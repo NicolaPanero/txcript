@@ -175,6 +175,7 @@ fn fixpoint_common() -> Transcript<Common> {
             title: Some("fixpoint".into()),
             cli_version: None,
             model: None,
+            lineage: None,
         },
         vec![
             msg(
@@ -266,6 +267,7 @@ fn from_common_is_deterministic() {
             title: None,
             cli_version: None,
             model: None,
+            lineage: None,
         },
         vec![Message {
             role: Role::User,
@@ -358,6 +360,7 @@ fn common_to_transcript_entries_ids_unique_across_consecutive_assistants() {
             title: Some("unique".into()),
             cli_version: None,
             model: None,
+            lineage: None,
         },
         vec![
             msg(Role::User, vec![Block::Text { text: "hi".into() }]),

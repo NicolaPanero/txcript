@@ -1723,6 +1723,8 @@ fn meta_from_db(db: &AntigravityDb) -> Meta {
         title,
         cli_version: None,
         model,
+        // Antigravity's session database carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

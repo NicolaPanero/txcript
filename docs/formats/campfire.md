@@ -45,6 +45,11 @@ In txcript, `Campfire` is a distinct harness marker sharing pi's native
 `Record` body; its codec and store delegate to the `pub(crate)` helpers in
 `src/harness/pi.rs`.
 
+## Lineage
+
+Identical to pi: `parentSession` in the header resolves to a Fork `Meta.lineage`. See
+[pi.md](pi.md#lineage).
+
 ## Caveats
 
 All of pi's caveats apply unchanged (branch flattening, Common lossiness,
@@ -63,5 +68,5 @@ loads as a Campfire session, and vice versa.
 The authoritative txcript mapping is `src/harness/campfire.rs` (a thin
 delegate over `src/harness/pi.rs`).
 
-Last verified: 2026-08-10, against src/harness/campfire.rs and real local
+Last verified: 2026-09-26, against src/harness/campfire.rs and real local
 sessions.

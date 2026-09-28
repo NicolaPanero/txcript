@@ -40,6 +40,35 @@ pub struct Meta {
     /// Primary model used across the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// How this session relates to another, when its own records say so.
+    ///
+    /// Read-side only: a harness's discovery and load paths fill this from
+    /// whatever header or early record carries the signal (see
+    /// `docs/formats/*.md` for the per-harness field). No codec's
+    /// `from_common` writes it back into a native session yet — round-
+    /// tripping provenance into native formats is a separate, later change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<Lineage>,
+}
+
+/// How one session relates to another in the same harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lineage {
+    /// The related session's id, in the same harness.
+    pub parent: String,
+    pub relation: Relation,
+}
+
+/// The kind of relationship a [`Lineage`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Relation {
+    /// Copied the parent's history up to some point; the parent may go on.
+    Fork,
+    /// Carried the parent's history forward into a new session.
+    Continue,
+    /// Started by another agent session (subagent, teammate, reviewer).
+    Spawn,
 }
 
 /// Who authored a message. Tool results ride on [`Role::User`] messages, per

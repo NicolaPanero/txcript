@@ -335,6 +335,7 @@ fn to_common_extracts_conversation_with_display_log_backfill() {
 /// tool calls grouped per assistant record, thinking as its own message,
 /// results one per message, stop reasons only on each turn's last assistant
 /// message, millisecond timestamps.
+#[allow(clippy::too_many_lines)]
 fn representable_common() -> Transcript<txcript::Common> {
     let meta = Meta {
         id: SESSION_ID.into(),
@@ -344,6 +345,7 @@ fn representable_common() -> Transcript<txcript::Common> {
         title: Some("Repo Q&A".into()),
         cli_version: None,
         model: Some("grok-composer-2.5-fast".into()),
+        lineage: None,
     };
     let model = || Some("grok-composer-2.5-fast".to_string());
     let body = vec![

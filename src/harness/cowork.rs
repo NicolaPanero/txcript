@@ -266,6 +266,11 @@ fn meta_from_parts(header: &Header, transcript: Meta) -> Meta {
         title: non_empty(&header.title).or(transcript.title),
         cli_version: transcript.cli_version,
         model: non_empty(&header.model).or(transcript.model),
+        // Cowork's own header carries no lineage signal; pass through
+        // whatever the embedded Claude Code transcript resolved (currently
+        // always `None` — teammate lineage there is resolved store-side, and
+        // Cowork sessions aren't teammates of a lead in that store).
+        lineage: transcript.lineage,
     }
 }
 

@@ -1202,6 +1202,8 @@ fn meta_from_body(body: &GrokSession) -> Meta {
         title: get("generated_title").or_else(|| get("session_summary")),
         cli_version: None,
         model,
+        // Grok's session body carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

@@ -885,6 +885,8 @@ fn meta_from_parts(parts: MetaParts) -> Meta {
         title: parts.title.filter(|t| !t.trim().is_empty()),
         cli_version,
         model: parts.model.or(tag_model),
+        // Amp threads carry no parent/fork/spawn signal in what txcript reads.
+        lineage: None,
     }
 }
 

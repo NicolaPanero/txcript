@@ -585,6 +585,7 @@ mod tests {
                 title: Some("Crop me".into()),
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             body,
         )

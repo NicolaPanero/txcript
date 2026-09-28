@@ -68,6 +68,7 @@ mod tests {
             title: Some("Export round trip".into()),
             cli_version: Some("1.2.3".into()),
             model: Some("claude-fable-5".into()),
+            lineage: None,
         };
         let messages = vec![
             Message {

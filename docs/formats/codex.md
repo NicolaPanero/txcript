@@ -60,7 +60,7 @@ it carries.
 
 | Their name | What it is | Maps to |
 |---|---|---|
-| `session_meta` | Header: `id`, `timestamp`, `cwd`, `cli_version`, `git.branch`, `model_provider`, instructions | `Meta` (id, timestamp, cwd, git_branch, cli_version, model) |
+| `session_meta` | Header: `id`, `timestamp`, `cwd`, `cli_version`, `git.branch`, `model_provider`, instructions, `source`/`parent_thread_id`/`forked_from_id` | `Meta` (id, timestamp, cwd, git_branch, cli_version, model, lineage) |
 | `turn_context` | Turn boundary: `turn_id`, `model`, cwd, sandbox/approval policy | Model attribution for the turn's assistant messages |
 | `response_item` / `message` | User or assistant message; `content` array of `input_text` / `output_text` / `input_image` (data URL) | `Message` with `Text` / `Image` blocks |
 | `response_item` / `reasoning` | Reasoning item: `summary` array of `summary_text`, opaque `encrypted_content` | Assistant `Thinking` block (summary text only) |
@@ -92,6 +92,19 @@ A synthetic `response_item` line, shaped like the real thing:
 
 That becomes an assistant `ToolUse` with tool `Bash { command: "cargo test" }` — argv arrays of
 the form `["bash"|"sh"|"zsh", "-lc"|"-c", cmd]` collapse to the inner command.
+
+## Lineage
+
+`session_meta.payload` names a parent two ways, and `Meta::lineage` is filled from whichever
+applies, at discovery time as well as on load — reading the header line is all it costs.
+`source.subagent` present means this thread was spawned: the parent is
+`source.subagent.thread_spawn.parent_thread_id` for a spawned subagent, or the top-level
+`parent_thread_id` for the guardian-review shape (`source.subagent.other == "guardian"`, usually
+paired with `thread_source: "guardian_review"`) and any other subagent shape. No `source.subagent`
+but a top-level `parent_thread_id` is also a spawn. Otherwise, `forked_from_id` is a fork. A
+subagent thread forked from its parent's history at spawn time carries both fields; spawn wins.
+Writing lineage back into a rollout is not implemented yet — `from_common` never emits
+`source`/`parent_thread_id`/`forked_from_id`.
 
 ## Caveats
 
@@ -138,4 +151,4 @@ the form `["bash"|"sh"|"zsh", "-lc"|"-c", cmd]` collapse to the inner command.
 - Authoritative mapping in this repo: `src/harness/codex.rs` (codec, store, tool normalization),
   with shape fixtures and aggregation assertions in `tests/integration/codex.rs`.
 
-Last verified: 2026-08-10, against src/harness/codex.rs and real local sessions.
+Last verified: 2026-09-26, against src/harness/codex.rs and real local sessions.

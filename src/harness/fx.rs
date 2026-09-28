@@ -1101,6 +1101,8 @@ fn meta_from_body(body: &FxSession) -> Meta {
         title,
         cli_version: None,
         model,
+        // fx's session body carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

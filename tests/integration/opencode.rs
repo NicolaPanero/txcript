@@ -24,6 +24,7 @@ fn meta() -> common::Meta {
         title: Some("Demo".into()),
         cli_version: Some("1.15.0".into()),
         model: Some("claude-opus-4-7".into()),
+        lineage: None,
     }
 }
 
@@ -261,6 +262,7 @@ fn sample_parallel_common() -> Transcript<Common> {
         title: Some("Parallel".into()),
         cli_version: Some("1.15.0".into()),
         model: Some("claude-opus-4-7".into()),
+        lineage: None,
     };
     let model = || Some("claude-opus-4-7".to_string());
     let body = vec![

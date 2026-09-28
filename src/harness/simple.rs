@@ -372,6 +372,9 @@ impl TextCodec for Simple {
             title: take_str(&mut map, "title"),
             cli_version: take_str(&mut map, "cli_version"),
             model: take_str(&mut map, "model"),
+            // Simple is a generic interchange document; it carries no
+            // parent/fork/spawn signal of its own.
+            lineage: None,
         };
         Ok(Transcript::new(
             meta,

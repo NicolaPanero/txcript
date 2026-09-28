@@ -22,6 +22,7 @@ fn small_common(id: &str) -> Transcript<Common> {
         title: Some("deletable".to_string()),
         cli_version: None,
         model: None,
+        lineage: None,
     };
     let message = Message {
         role: Role::User,
@@ -235,7 +236,8 @@ mod opencode_archive {
         let conn = rusqlite::Connection::open(path).unwrap_or_else(|e| panic!("open: {e}"));
         conn.execute_batch(
             "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT,
-                 version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT);
+                 version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT,
+                 parent_id TEXT);
              CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
              CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
              INSERT INTO session (id, directory, title, version, time_created, model)

@@ -828,6 +828,7 @@ mod tests {
                 title: Some("Fix the parser".into()),
                 cli_version: None,
                 model: Some("test-model".into()),
+                lineage: None,
             },
             vec![Message {
                 role: Role::User,

@@ -490,6 +490,7 @@ fn fixpoint_common() -> Transcript<Common> {
         title: None,
         cli_version: None,
         model: Some("model-1020".into()),
+        lineage: None,
     };
     let model = || Some("model-1020".to_string());
     let usage = common::Usage {

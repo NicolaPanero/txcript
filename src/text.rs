@@ -199,6 +199,7 @@ mod tests {
                 title: Some("Fix the parser".into()),
                 cli_version: Some("9.9.9".into()),
                 model: Some("model-name".into()),
+                lineage: None,
             },
             body,
         )

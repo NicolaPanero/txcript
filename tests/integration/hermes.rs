@@ -141,6 +141,7 @@ fn sample_common() -> Transcript<Common> {
         title: Some("Hermes fixpoint".into()),
         cli_version: None,
         model: Some("gpt-5.6-sol".into()),
+        lineage: None,
     };
     Transcript::new(
         meta,

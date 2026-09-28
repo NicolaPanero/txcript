@@ -209,6 +209,7 @@ mod tests {
             title: Some(format!("title {id}")),
             cli_version: None,
             model: None,
+            lineage: None,
         };
         let key = DocKey {
             harness: HarnessId::Codex,

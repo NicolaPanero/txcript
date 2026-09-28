@@ -46,6 +46,7 @@ fn session(s: usize) -> Transcript<Common> {
         )),
         cli_version: None,
         model: Some("claude-opus-4-8".to_string()),
+        lineage: None,
     };
     let body = (0..MESSAGES)
         .map(|m| {

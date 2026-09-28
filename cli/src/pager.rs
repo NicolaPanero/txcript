@@ -2614,6 +2614,7 @@ mod tests {
                     title: None,
                     cli_version: None,
                     model: None,
+                    lineage: None,
                 },
                 Vec::new(),
             ),
@@ -3407,6 +3408,7 @@ mod tests {
                 title: None,
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             body,
         );

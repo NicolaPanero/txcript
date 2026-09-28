@@ -1527,6 +1527,8 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
         title,
         cli_version: None,
         model,
+        // Cursor's chat database carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

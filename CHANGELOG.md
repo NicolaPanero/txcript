@@ -9,6 +9,16 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## Unreleased
+
+### Added
+
+- Add read-side session lineage (`Meta::lineage`): fork/continue/spawn relationships read from
+  Codex's `session_meta` (subagent spawns, guardian review, `/fork`), pi/Campfire's
+  `parentSession` (`/fork`, `/clone`), OpenCode's `session.parent_id`, and Claude Code
+  teammates' `teamName`/`agentName`. Filled at discovery time, not only on load. Writing
+  lineage into native formats is not implemented yet.
+
 ## [0.14.4](https://github.com/skillsynchq/txcript/compare/v0.14.3...v0.14.4) - 2026-09-13
 
 ### Fixed

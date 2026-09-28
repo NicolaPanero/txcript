@@ -255,6 +255,7 @@ fn sample_common() -> Transcript<Common> {
         title: None,
         cli_version: Some("0.104.0".into()),
         model: Some("gpt-5.2-codex".into()),
+        lineage: None,
     };
     let model = || Some("gpt-5.2-codex".to_string());
     let body = vec![
@@ -668,4 +669,49 @@ fn interleaved_tool_calls_keep_their_results_through_disk() {
             .collect::<Vec<_>>()
     };
     assert_eq!(blocks(common), blocks(back));
+}
+
+/// `discover` resolves lineage straight from `session_meta` — no `load` or
+/// full parse needed. Covers a `thread_spawn` subagent (spawn) and a plain
+/// `forked_from_id` session (fork) side by side.
+#[test]
+fn discover_resolves_lineage_from_session_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-05-spawned.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"spawned","source":{"subagent":{"thread_spawn":{"parent_thread_id":"lead"}}}}}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-06-forked.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:06.000Z","type":"session_meta","payload":{"id":"forked","forked_from_id":"origin"}}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-07-plain.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:07.000Z","type":"session_meta","payload":{"id":"plain"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let found = codex::CodexStore::new(dir.path()).discover().unwrap();
+    let by_id = |id: &str| found.iter().find(|d| d.meta.id == id).unwrap();
+
+    let spawned = by_id("spawned").meta.lineage.as_ref().unwrap();
+    assert_eq!(spawned.parent, "lead");
+    assert_eq!(spawned.relation, common::Relation::Spawn);
+
+    let forked = by_id("forked").meta.lineage.as_ref().unwrap();
+    assert_eq!(forked.parent, "origin");
+    assert_eq!(forked.relation, common::Relation::Fork);
+
+    assert!(by_id("plain").meta.lineage.is_none());
 }

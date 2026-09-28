@@ -235,6 +235,8 @@ fn meta_from_conversation(conversation: &Conversation) -> Meta {
         title: string("title"),
         cli_version: None,
         model: conversation_model(conversation),
+        // ChatGPT's conversation payload carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 
@@ -629,6 +631,7 @@ mod remote {
                                 .get("default_model_slug")
                                 .and_then(Value::as_str)
                                 .map(String::from),
+                            lineage: None,
                         },
                         reference: ChatGptRef {
                             conversation_id: id.to_string(),

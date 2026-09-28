@@ -198,6 +198,7 @@ fn sample_common() -> Transcript<Common> {
         title: Some("Parser work".into()),
         cli_version: Some("1.2.3".into()),
         model: Some("claude-opus-4-8".into()),
+        lineage: None,
     };
     let body = vec![
         common::Message {
@@ -571,4 +572,133 @@ fn commands_are_searchable_by_name() {
             .any(|hit| hit.origin == txcript::search::Origin::ToolUse),
         "the command name should be searchable"
     );
+}
+
+// ── teammate lineage ────────────────────────────────────────────────────
+
+/// One minimal `user` line for a session, optionally carrying the
+/// `teamName`/`agentName` fields a teammate record sets.
+fn teammate_line(session_id: &str, team_name: Option<&str>, agent_name: Option<&str>) -> String {
+    let mut line = json!({
+        "type": "user", "uuid": "u1", "parentUuid": null,
+        "sessionId": session_id, "timestamp": "2026-01-02T03:04:05.000Z",
+        "message": {"role": "user", "content": "hi"},
+    });
+    if let Some(team_name) = team_name {
+        line["teamName"] = json!(team_name);
+    }
+    if let Some(agent_name) = agent_name {
+        line["agentName"] = json!(agent_name);
+    }
+    format!("{line}\n")
+}
+
+/// A teammate's `teamName` resolves to the lead session's full id, among
+/// the store's sessions, without calling `Session::read`/`load` — the
+/// resolution happens in `discover`'s own pass over every session's id.
+#[test]
+fn discover_resolves_teammate_lineage_to_the_lead_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-work-repo");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let lead_id = "35838766-f676-49a4-8731-47becf50e6e1";
+    std::fs::write(
+        project.join(format!("{lead_id}.jsonl")),
+        teammate_line(lead_id, None, None),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("teammate.jsonl"),
+        teammate_line("teammate", Some("session-35838766"), Some("tr-ru")),
+    )
+    .unwrap();
+
+    let store = claude_code::ClaudeStore::new(dir.path());
+    let found = store.discover().unwrap();
+    let teammate = found
+        .iter()
+        .find(|d| d.meta.id == "teammate")
+        .expect("teammate session discovered");
+    let lineage = teammate.meta.lineage.as_ref().expect("spawn lineage");
+    assert_eq!(lineage.parent, lead_id);
+    assert_eq!(lineage.relation, common::Relation::Spawn);
+
+    // The lead session itself carries no lineage.
+    let lead = found.iter().find(|d| d.meta.id == lead_id).unwrap();
+    assert!(lead.meta.lineage.is_none());
+
+    // `load` resolves the same teammate's lineage on its own, via the
+    // sibling filenames rather than a full re-discovery.
+    let loaded = store.load(&project.join("teammate.jsonl")).unwrap();
+    let lineage = loaded.meta.lineage.as_ref().expect("spawn lineage on load");
+    assert_eq!(lineage.parent, lead_id);
+}
+
+/// No `teamName`/`agentName` at all: no lineage. (`sample_jsonl` already
+/// covers this implicitly; this test makes the "no field" case explicit.)
+#[test]
+fn discover_without_team_fields_has_no_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-work-repo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("solo.jsonl"),
+        teammate_line("solo", None, None),
+    )
+    .unwrap();
+
+    let store = claude_code::ClaudeStore::new(dir.path());
+    let found = store.discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].meta.lineage.is_none());
+}
+
+/// `teamName` without a matching lead session anywhere in the store: the
+/// prefix is unresolvable, and the design calls for not guessing.
+#[test]
+fn discover_leaves_lineage_none_when_the_lead_prefix_is_unresolvable() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-work-repo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("teammate.jsonl"),
+        teammate_line("teammate", Some("session-deadbeef"), Some("tr-ru")),
+    )
+    .unwrap();
+
+    let store = claude_code::ClaudeStore::new(dir.path());
+    let found = store.discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].meta.lineage.is_none());
+}
+
+/// Two sessions share the same 8-hex id prefix: the `teamName` match is
+/// ambiguous, and is left unresolved rather than guessed at.
+#[test]
+fn discover_leaves_lineage_none_when_the_lead_prefix_is_ambiguous() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("-work-repo");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for id in [
+        "35838766-aaaa-49a4-8731-47becf50e6e1",
+        "35838766-bbbb-49a4-8731-47becf50e6e1",
+    ] {
+        std::fs::write(
+            project.join(format!("{id}.jsonl")),
+            teammate_line(id, None, None),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        project.join("teammate.jsonl"),
+        teammate_line("teammate", Some("session-35838766"), Some("tr-ru")),
+    )
+    .unwrap();
+
+    let store = claude_code::ClaudeStore::new(dir.path());
+    let found = store.discover().unwrap();
+    let teammate = found.iter().find(|d| d.meta.id == "teammate").unwrap();
+    assert!(teammate.meta.lineage.is_none());
 }

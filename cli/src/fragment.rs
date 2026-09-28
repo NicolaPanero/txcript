@@ -268,6 +268,7 @@ mod tests {
                 title: None,
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             body.to_vec(),
         )

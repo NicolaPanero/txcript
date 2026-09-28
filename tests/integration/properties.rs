@@ -126,6 +126,7 @@ fn build(units: &[Unit]) -> Transcript<Common> {
         title: Some("property".to_string()),
         cli_version: None,
         model: Some("claude-opus-4-8".to_string()),
+        lineage: None,
     };
     let msg = |role, content, secs| Message {
         role,

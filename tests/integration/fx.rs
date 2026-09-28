@@ -373,6 +373,7 @@ fn representable_common() -> Transcript<txcript::Common> {
         title: Some("Repo work".into()),
         cli_version: None,
         model: Some("zai/glm-5.2".into()),
+        lineage: None,
     };
     let model = || Some("zai/glm-5.2".to_string());
     let t1 = ts("2026-07-02T01:24:12.000Z");
@@ -614,6 +615,7 @@ fn interrupted_turn_round_trips() {
         title: None,
         cli_version: None,
         model: Some("zai/glm-5.2".into()),
+        lineage: None,
     };
     let t = ts("2026-07-02T01:24:12.000Z");
     let common = Transcript::new(

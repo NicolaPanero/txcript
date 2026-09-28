@@ -22,7 +22,9 @@ use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, Usage};
+use crate::common::{
+    Block, ImageSource, Lineage, Message, Meta, Relation, Role, Tool, ToolOutput, Usage,
+};
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
@@ -1052,6 +1054,7 @@ fn meta_from_lines(lines: &[Line]) -> Meta {
         title: None,
         cli_version: None,
         model: None,
+        lineage: None,
     };
     // Only the first session_meta names the session.
     if let Some(p) = lines
@@ -1086,8 +1089,58 @@ fn meta_from_lines(lines: &[Line]) -> Meta {
         {
             meta.timestamp = ts;
         }
+        meta.lineage = lineage_from_session_meta(p);
     }
     meta
+}
+
+/// Codex's `session_meta.payload` names its parent two ways, per
+/// `codex-rs/protocol.rs`'s `SessionMeta`/`SubAgentSource`:
+///
+/// - `source.subagent` present → this thread was spawned. The parent lives
+///   in `source.subagent.thread_spawn.parent_thread_id` when that shape is
+///   present; the guardian-review shape (`source.subagent.other == "guardian"`,
+///   often paired with `thread_source == "guardian_review"`) and any other
+///   subagent shape instead carry it in the top-level `parent_thread_id`.
+/// - No `source.subagent`, but a top-level `parent_thread_id` → also a spawn
+///   (reserved for a shape this file hasn't seen yet on this machine).
+/// - Otherwise, `forked_from_id` → a fork (`/fork`, resume-from-point).
+///
+/// Spawn wins when both `source.subagent` and `forked_from_id` are present:
+/// a subagent thread forked from the parent's history at spawn time carries
+/// both, and the relationship that matters is that it was spawned.
+fn lineage_from_session_meta(payload: &Value) -> Option<Lineage> {
+    let top_level_parent = || {
+        payload
+            .get("parent_thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if let Some(subagent) = payload.get("source").and_then(|s| s.get("subagent")) {
+        let parent = subagent
+            .get("thread_spawn")
+            .and_then(|spawn| spawn.get("parent_thread_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(top_level_parent)?;
+        return Some(Lineage {
+            parent,
+            relation: Relation::Spawn,
+        });
+    }
+    if let Some(parent) = top_level_parent() {
+        return Some(Lineage {
+            parent,
+            relation: Relation::Spawn,
+        });
+    }
+    payload
+        .get("forked_from_id")
+        .and_then(Value::as_str)
+        .map(|parent| Lineage {
+            parent: parent.to_string(),
+            relation: Relation::Fork,
+        })
 }
 
 fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1579,4 +1632,90 @@ fn file_fingerprint(path: &Path) -> String {
 
 fn home() -> Option<PathBuf> {
     super::home_dir()
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::lineage_from_session_meta;
+    use crate::common::Relation;
+    use serde_json::json;
+
+    /// A plain session carries neither field: no lineage.
+    #[test]
+    fn no_field_means_no_lineage() {
+        let payload = json!({"id": "s1"});
+        assert!(lineage_from_session_meta(&payload).is_none());
+    }
+
+    /// `thread_spawn`'s nested `parent_thread_id` names the parent of a
+    /// spawned subagent thread.
+    #[test]
+    fn thread_spawn_is_a_spawn() {
+        let payload = json!({
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-1"}}}
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-1");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// The guardian-review subagent shape carries its parent at the
+    /// top level, not under `thread_spawn`.
+    #[test]
+    fn guardian_review_subagent_is_a_spawn_via_top_level_parent() {
+        let payload = json!({
+            "parent_thread_id": "parent-2",
+            "source": {"subagent": {"other": "guardian"}},
+            "thread_source": "guardian_review",
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-2");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// Any other `source.subagent` shape still falls back to the top-level
+    /// `parent_thread_id` — the subagent signal alone means spawn.
+    #[test]
+    fn unrecognized_subagent_shape_still_falls_back_to_top_level_parent() {
+        let payload = json!({
+            "parent_thread_id": "parent-3",
+            "source": {"subagent": {"something_new": true}},
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-3");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// A top-level `parent_thread_id` with no `source.subagent` at all is
+    /// still a spawn (the design reserves this for a shape not yet seen).
+    #[test]
+    fn top_level_parent_without_subagent_is_a_spawn() {
+        let payload = json!({"parent_thread_id": "parent-4"});
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-4");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// No subagent signal, but `forked_from_id`: a fork.
+    #[test]
+    fn forked_from_id_alone_is_a_fork() {
+        let payload = json!({"forked_from_id": "parent-5"});
+        let lineage = lineage_from_session_meta(&payload).expect("fork lineage");
+        assert_eq!(lineage.parent, "parent-5");
+        assert_eq!(lineage.relation, Relation::Fork);
+    }
+
+    /// A subagent thread spawned from the parent's history carries both
+    /// `source.subagent` and `forked_from_id`; spawn wins.
+    #[test]
+    fn spawn_wins_over_fork_when_both_present() {
+        let payload = json!({
+            "forked_from_id": "parent-6",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-6"}}},
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
 }

@@ -314,6 +314,8 @@ fn meta_from_export(body: &Value) -> Meta {
         title: string("title"),
         cli_version: string("cli_version"),
         model: string("model"),
+        // Hermes's export carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

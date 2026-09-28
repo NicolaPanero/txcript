@@ -157,6 +157,9 @@ fn meta_from_conversation(conversation: &Conversation) -> Meta {
         title: string("name").or_else(|| string("summary")),
         cli_version: None,
         model: conversation_model(conversation),
+        // Claude Chat's conversation payload carries no parent/fork/spawn
+        // signal in what txcript reads.
+        lineage: None,
     }
 }
 
@@ -2744,6 +2747,7 @@ mod remote {
                     title: None,
                     cli_version: None,
                     model: None,
+                    lineage: None,
                 },
                 Conversation {
                     chat_messages: Vec::new(),

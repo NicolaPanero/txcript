@@ -23,6 +23,7 @@ fn sample_common() -> Transcript<Common> {
         title: Some("Cursor demo".into()),
         cli_version: None,
         model: Some("composer-2.5-fast".into()),
+        lineage: None,
     };
     Transcript::new(
         meta,
@@ -507,6 +508,7 @@ fn parses_existing_cursor_message_shapes() {
             title: None,
             cli_version: None,
             model: None,
+            lineage: None,
         },
         body,
     );

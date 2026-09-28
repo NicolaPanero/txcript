@@ -192,6 +192,7 @@ fn sample_common() -> Transcript<Common> {
         title: None,
         cli_version: None,
         model: Some("claude-opus-4-8".into()),
+        lineage: None,
     };
     let body = vec![
         common::Message {
@@ -286,6 +287,7 @@ fn custom_and_mcp_tool_names_preserve_exact_casing() {
             title: Some("Casing".into()),
             cli_version: None,
             model: Some("claude-opus-4-8".into()),
+            lineage: None,
         };
         let common = Transcript::new(
             meta,
@@ -344,4 +346,108 @@ fn custom_and_mcp_tool_names_preserve_exact_casing() {
             other => panic!("expected Tool::Raw, got {other:?}"),
         }
     }
+}
+
+/// A session with no `parentSession` header field: no lineage.
+#[test]
+fn discover_without_parent_session_field_has_no_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("--repo--");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("child.jsonl"), sample_jsonl()).unwrap();
+
+    let store = pi::PiStore::new(dir.path());
+    let found = store.discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(found[0].meta.lineage.is_none());
+}
+
+/// `parentSession` names the parent's own `.jsonl` file by absolute path;
+/// discovery resolves it to the parent's header `id` and records a Fork —
+/// pi's `/fork` and `/clone` both set this field.
+#[test]
+fn discover_resolves_parent_session_path_to_a_fork() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("--repo--");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let parent_path = project.join("parent.jsonl");
+    std::fs::write(
+        &parent_path,
+        format!(
+            "{}\n",
+            json!({"type": "session", "version": 3, "id": "parent-id", "timestamp": "2026-01-02T03:00:00.000Z", "cwd": "/repo"})
+        ),
+    )
+    .unwrap();
+
+    let child_path = project.join("child.jsonl");
+    std::fs::write(
+        &child_path,
+        format!(
+            "{}\n",
+            json!({
+                "type": "session", "version": 3, "id": "child-id",
+                "timestamp": "2026-01-02T03:04:05.000Z", "cwd": "/repo",
+                "parentSession": parent_path.to_string_lossy(),
+            })
+        ),
+    )
+    .unwrap();
+
+    let store = pi::PiStore::new(dir.path());
+    let found = store.discover().unwrap();
+    let child = found
+        .iter()
+        .find(|d| d.meta.id == "child-id")
+        .expect("child session discovered");
+    let lineage = child.meta.lineage.as_ref().expect("fork lineage");
+    assert_eq!(lineage.parent, "parent-id");
+    assert_eq!(lineage.relation, common::Relation::Fork);
+
+    // `Session::read`'s path (`Pi::from_text`) resolves it identically, not
+    // only the discovery shallow scan.
+    let loaded = pi::Pi::to_common(&store.load(&child_path).unwrap()).unwrap();
+    let lineage = loaded.meta.lineage.as_ref().expect("fork lineage on load");
+    assert_eq!(lineage.parent, "parent-id");
+    assert_eq!(lineage.relation, common::Relation::Fork);
+}
+
+/// A parent header with no `id` (a malformed or emptied header) falls back
+/// to the parent file's own filename-derived id — the same fallback
+/// `PiStore::load` uses for any pi session.
+#[test]
+fn discover_resolves_parent_session_by_filename_when_header_id_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("--repo--");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let parent_path = project.join("parent-file-id.jsonl");
+    std::fs::write(
+        &parent_path,
+        format!("{}\n", json!({"type": "session", "version": 3, "id": ""})),
+    )
+    .unwrap();
+
+    let child_path = project.join("child.jsonl");
+    std::fs::write(
+        &child_path,
+        format!(
+            "{}\n",
+            json!({
+                "type": "session", "version": 3, "id": "child-id",
+                "parentSession": parent_path.to_string_lossy(),
+            })
+        ),
+    )
+    .unwrap();
+
+    let store = pi::PiStore::new(dir.path());
+    let found = store.discover().unwrap();
+    let child = found
+        .iter()
+        .find(|d| d.meta.id == "child-id")
+        .expect("child session discovered");
+    let lineage = child.meta.lineage.as_ref().expect("fork lineage");
+    assert_eq!(lineage.parent, "parent-file-id");
 }

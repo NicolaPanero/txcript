@@ -378,6 +378,7 @@ fn meta() -> common::Meta {
         title: Some("Round trip".into()),
         cli_version: Some("0.0.1768178000-gaaaaaa".into()),
         model: Some("claude-opus-4-5-20251101".into()),
+        lineage: None,
     }
 }
 

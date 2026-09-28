@@ -188,6 +188,8 @@ fn meta_from_parts(
         title,
         cli_version: None,
         model,
+        // Cursor desktop's composer data carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 

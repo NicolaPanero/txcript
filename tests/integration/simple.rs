@@ -182,6 +182,7 @@ fn rich_common() -> Transcript<Common> {
         title: Some("Pagination fix".into()),
         cli_version: Some("0.1.0".into()),
         model: Some("claude-opus-5".into()),
+        lineage: None,
     };
     let body = vec![
         common::Message {

@@ -118,6 +118,9 @@ fn meta_from_info(info: &Value) -> Meta {
         title,
         cli_version: string("version"),
         model,
+        // OpenCode's parent-session signal is the SQLite `session.parent_id`
+        // column, not a field in the export/import JSON this path reads.
+        lineage: None,
     }
 }
 
@@ -837,7 +840,7 @@ mod store {
     use serde_json::Value;
 
     use super::{Export, MessageRecord, OpenCode};
-    use crate::common::Meta;
+    use crate::common::{Lineage, Meta, Relation};
     use crate::error::{Error, Result};
     use crate::transcript::{Discovered, Saved, Store, Transcript};
     use chrono::{DateTime, Utc};
@@ -895,7 +898,7 @@ mod store {
                 let conn = self.open()?;
                 let mut stmt = conn
                     .prepare(
-                        "SELECT id, directory, title, version, time_created, model \
+                        "SELECT id, directory, title, version, time_created, model, parent_id \
                          FROM session WHERE time_archived IS NULL ORDER BY time_created DESC",
                     )
                     .map_err(sqlite_err)?;
@@ -908,6 +911,7 @@ mod store {
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<i64>>(4)?,
                             row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     })
                     .map_err(sqlite_err)?;
@@ -915,19 +919,22 @@ mod store {
                 Ok(raw
                     .into_iter()
                     .map(
-                        |(id, directory, title, version, time_created, model_json)| Discovered {
-                            meta: Meta {
-                                id: id.clone(),
-                                timestamp: time_created
-                                    .and_then(DateTime::from_timestamp_millis)
-                                    .unwrap_or_else(Utc::now),
-                                cwd: directory,
-                                git_branch: None,
-                                title: title.filter(|t| !is_placeholder_title(t)),
-                                cli_version: version,
-                                model: model_json.as_deref().and_then(model_id),
-                            },
-                            reference: id,
+                        |(id, directory, title, version, time_created, model_json, parent_id)| {
+                            Discovered {
+                                meta: Meta {
+                                    id: id.clone(),
+                                    timestamp: time_created
+                                        .and_then(DateTime::from_timestamp_millis)
+                                        .unwrap_or_else(Utc::now),
+                                    cwd: directory,
+                                    git_branch: None,
+                                    title: title.filter(|t| !is_placeholder_title(t)),
+                                    cli_version: version,
+                                    model: model_json.as_deref().and_then(model_id),
+                                    lineage: lineage_from_parent_id(parent_id),
+                                },
+                                reference: id,
+                            }
                         },
                     )
                     .collect())
@@ -1111,7 +1118,8 @@ mod store {
     fn session_row(conn: &Connection, id: &str) -> Result<(Meta, Value)> {
         let mut stmt = conn
             .prepare(
-                "SELECT directory, title, version, time_created, model, slug, time_updated \
+                "SELECT directory, title, version, time_created, model, slug, time_updated, \
+                        parent_id \
                  FROM session WHERE id = ?1",
             )
             .map_err(sqlite_err)?;
@@ -1125,10 +1133,12 @@ mod store {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(sqlite_err)?;
-        let (directory, title, version, time_created, model_json, slug, time_updated) = row;
+        let (directory, title, version, time_created, model_json, slug, time_updated, parent_id) =
+            row;
         let timestamp = time_created
             .and_then(DateTime::from_timestamp_millis)
             .unwrap_or_else(Utc::now);
@@ -1140,6 +1150,7 @@ mod store {
             title: title.clone().filter(|t| !is_placeholder_title(t)),
             cli_version: version.clone(),
             model: model_json.as_deref().and_then(model_id),
+            lineage: lineage_from_parent_id(parent_id),
         };
         let info = serde_json::json!({
             "id": id,
@@ -1157,6 +1168,17 @@ mod store {
 
     fn is_placeholder_title(title: &str) -> bool {
         title.trim().is_empty() || title.starts_with("New session - ")
+    }
+
+    /// `session.parent_id` names the session that spawned this one (`OpenCode`'s
+    /// subagent/task tool starts a child session with its own row). A non-empty
+    /// value is always a spawn — `OpenCode` has no fork/continue relation that
+    /// reuses this column.
+    fn lineage_from_parent_id(parent_id: Option<String>) -> Option<Lineage> {
+        parent_id.filter(|id| !id.is_empty()).map(|parent| Lineage {
+            parent,
+            relation: Relation::Spawn,
+        })
     }
 
     fn model_id(model_json: &str) -> Option<String> {
@@ -1180,7 +1202,7 @@ mod store {
     mod tests {
         use super::super::OpenCode;
         use super::OpenCodeStore;
-        use crate::common::{Block, Role, Tool};
+        use crate::common::{Block, Relation, Role, Tool};
         use crate::transcript::{Codec, Store};
         use rusqlite::{Connection, params};
 
@@ -1199,13 +1221,13 @@ mod store {
             conn.execute_batch(
                 "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, \
                    version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT, \
-                   slug TEXT, time_updated INTEGER);\
+                   slug TEXT, time_updated INTEGER, parent_id TEXT);\
                  CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);\
                  CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);",
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}','clever-engine',1778834704516)",
+                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}','clever-engine',1778834704516,NULL)",
                 [],
             )
             .unwrap();
@@ -1254,6 +1276,7 @@ mod store {
             assert_eq!(d.meta.title.as_deref(), Some("Demo"));
             assert_eq!(d.meta.model.as_deref(), Some("claude-opus-4-7"));
             assert_eq!(d.meta.cwd.as_deref(), Some("/repo"));
+            assert!(d.meta.lineage.is_none(), "no parent_id, no lineage");
 
             let native = store.load(&d.reference).unwrap();
             let msgs = OpenCode::to_common(&native).unwrap().body;
@@ -1278,13 +1301,43 @@ mod store {
             let path = make_db();
             let conn = Connection::open(&path).unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL,'quiet-harbor',1778834704601)",
+                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL,'quiet-harbor',1778834704601,NULL)",
                 [],
             )
             .unwrap();
             drop(conn);
             let found = OpenCodeStore::new(&path).discover().unwrap();
             assert!(found.iter().all(|d| d.reference != "ses_2"));
+        }
+
+        /// `session.parent_id` names a spawning session; the signal is a
+        /// bare column read, so both `discover` and `load` surface it
+        /// without any extra query.
+        #[test]
+        fn parent_id_column_becomes_spawn_lineage() {
+            let path = make_db();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_child','/repo','Task','1.15.0',1778834704700,NULL,NULL,'quiet-owl',1778834704701,'ses_1')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            let store = OpenCodeStore::new(&path);
+            let found = store.discover().unwrap();
+            let child = found
+                .iter()
+                .find(|d| d.reference == "ses_child")
+                .expect("child session discovered");
+            let lineage = child.meta.lineage.as_ref().expect("spawn lineage");
+            assert_eq!(lineage.parent, "ses_1");
+            assert_eq!(lineage.relation, Relation::Spawn);
+
+            let loaded = store.load(&child.reference).unwrap();
+            let lineage = loaded.meta.lineage.as_ref().expect("spawn lineage on load");
+            assert_eq!(lineage.parent, "ses_1");
+            assert_eq!(lineage.relation, Relation::Spawn);
         }
     }
 }

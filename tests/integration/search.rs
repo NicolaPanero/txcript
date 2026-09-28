@@ -19,6 +19,7 @@ fn meta(id: &str, secs: i64) -> Meta {
         title: Some(format!("session {id}")),
         cli_version: None,
         model: None,
+        lineage: None,
     }
 }
 

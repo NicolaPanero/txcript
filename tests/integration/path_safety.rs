@@ -24,6 +24,7 @@ fn small_common(id: &str) -> Transcript<Common> {
         title: Some("hostile".to_string()),
         cli_version: None,
         model: None,
+        lineage: None,
     };
     let message = Message {
         role: Role::User,

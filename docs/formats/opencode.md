@@ -47,7 +47,7 @@ native `Body` for this harness.
 
 | Their name | What it is | Maps to |
 |---|---|---|
-| session | Header row: id (`ses_…`), directory, title, version, created time, model | `Meta` — id, timestamp, cwd, title, cli_version, model (`git_branch` is never available) |
+| session | Header row: id (`ses_…`), directory, title, version, created time, model, `parent_id` | `Meta` — id, timestamp, cwd, title, cli_version, model, lineage (`git_branch` is never available) |
 | message | One turn: `data` JSON with `role`, plus `modelID`, `finish`, `tokens` on assistant turns | One or more Common `Message`s, `Role::User` / `Role::Assistant` |
 | part `text` | Prose; `"synthetic": true` marks harness-injected text | `Block::Text` (synthetic dropped) |
 | part `reasoning` | Model thinking | `Block::Thinking` (no signature) |
@@ -91,6 +91,14 @@ A synthetic message record, shaped like the real thing:
 }
 ```
 
+## Lineage
+
+`session.parent_id` names the session that spawned this one — OpenCode's subagent/task tool
+starts a child session with its own row. A non-empty value always becomes a Spawn
+`Meta.lineage`; it's a bare column read, so `discover` (one extra `SELECT` column) and `load`
+both fill it with no added query. OpenCode has no fork or continue relation that reuses this
+column. `from_common`/`opencode import` never writes it.
+
 ## Caveats
 
 - **Writes go through the CLI, not the DB.** txcript opens the database
@@ -103,7 +111,7 @@ A synthetic message record, shaped like the real thing:
 - **Schema drift.** The schema is Drizzle-migrated and moves quickly (the
   `session` table keeps growing columns). txcript touches only the stable
   core: `session(id, directory, title, version, time_created, time_archived,
-  model)`, `message(id, session_id, time_created, data)`,
+  model, parent_id)`, `message(id, session_id, time_created, data)`,
   `part(id, message_id, session_id, data)`. Channel builds may write
   `opencode-<channel>.db`; only `opencode.db` is discovered.
 - **Lossiness in Common.** Bookkeeping and synthetic parts are dropped;
@@ -130,7 +138,7 @@ A synthetic message record, shaped like the real thing:
 - Legacy JSON `storage/` tree and its migration:
   <https://github.com/sst/opencode/blob/3a90639cb57619a21e59f544b3e8d23ffed56f48/packages/opencode/src/storage/storage.ts>
 
-Last verified: 2026-08-10, against src/harness/opencode.rs and real local
+Last verified: 2026-09-26, against src/harness/opencode.rs and real local
 sessions. The authoritative mapping is `src/harness/opencode.rs` (codec,
 tool-name normalization, SQLite store) with `tests/integration/opencode.rs`
 as executable shape examples.

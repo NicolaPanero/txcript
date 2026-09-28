@@ -1044,6 +1044,7 @@ mod identity_tests {
                 title: None,
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             Vec::new(),
         )

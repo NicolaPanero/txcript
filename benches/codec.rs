@@ -26,6 +26,7 @@ fn synthetic_session() -> Transcript<Common> {
         title: Some("bench session".to_string()),
         cli_version: Some("1.2.3".to_string()),
         model: Some("claude-opus-4-8".to_string()),
+        lineage: None,
     };
     let mut body = Vec::new();
     for i in 0..50i64 {

@@ -1135,6 +1135,7 @@ mod resume_template_tests {
                 title: None,
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             updated_at: None,
             locator: super::Locator::Id("sess-1".to_string()),

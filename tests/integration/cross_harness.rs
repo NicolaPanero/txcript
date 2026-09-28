@@ -75,6 +75,7 @@ fn sample() -> Transcript<Common> {
         title: Some("Cross".into()),
         cli_version: None,
         model: Some("claude-opus-4-8".into()),
+        lineage: None,
     };
     let model = || Some("claude-opus-4-8".to_string());
     let body = vec![
@@ -139,6 +140,7 @@ fn sample_with_raw_tool(tool_name: &str) -> Transcript<Common> {
         title: Some("Cross Raw".into()),
         cli_version: None,
         model: Some("claude-opus-4-8".into()),
+        lineage: None,
     };
     let model = || Some("claude-opus-4-8".to_string());
     let body = vec![

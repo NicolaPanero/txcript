@@ -174,6 +174,7 @@ fn sample_transcript() -> Transcript<CursorDesktop> {
         title: Some("Can you evaluate the support".into()),
         cli_version: None,
         model: Some("composer-2".into()),
+        lineage: None,
     };
     Transcript::new(meta, sample_session())
 }
@@ -328,6 +329,7 @@ fn fixpoint_common() -> Transcript<Common> {
         title: Some("Fixpoint".into()),
         cli_version: None,
         model: Some("composer-2".into()),
+        lineage: None,
     };
     let t0 = ts("2026-08-17T06:30:36.299Z");
     let t1 = ts("2026-08-17T06:30:41.992Z");

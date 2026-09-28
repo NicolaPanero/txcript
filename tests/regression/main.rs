@@ -29,6 +29,7 @@ fn meta(id: &str) -> Meta {
         title: Some("regression".to_string()),
         cli_version: None,
         model: None,
+        lineage: None,
     }
 }
 

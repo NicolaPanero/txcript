@@ -53,7 +53,7 @@ under a `message` payload whose `role` discriminates further.
 
 | Their name | What it is | Maps to |
 |---|---|---|
-| `session` (line 1) | Header: `id`, `version` (3), `timestamp`, `cwd`, optional `parentSession` | `Meta.id`, `Meta.timestamp`, `Meta.cwd` |
+| `session` (line 1) | Header: `id`, `version` (3), `timestamp`, `cwd`, optional `parentSession` | `Meta.id`, `Meta.timestamp`, `Meta.cwd`, `Meta.lineage` |
 | `message` / role `user` | User turn; `content` is a string or array of `text`/`image` blocks | `Role::User` with `Block::Text` / `Block::Image` |
 | `message` / role `assistant` | Model turn; `content` blocks plus `model`, `provider`, `api`, `stopReason`, `usage` | `Role::Assistant`; `Message.model`, `.stop_reason`, `.usage` |
 | content block `toolCall` | Tool invocation: `id`, `name`, `arguments` | `Block::ToolUse`, tool normalized to canonical names |
@@ -90,6 +90,16 @@ A synthetic assistant line, shaped like the real thing:
    "stopReason": "toolUse", "timestamp": 1767323047000}}
 ```
 
+## Lineage
+
+`/fork` and `/clone` write the header's `parentSession`: an absolute path to the parent
+session's own `.jsonl` file, not its id. txcript resolves that path to the parent's `Meta.id`
+— reading only the parent's header line, not its whole body — the same way it derives any
+session's id: the header's own `id`, falling back to the filename when that's empty. The result
+is a Fork `Meta.lineage`, filled at discovery time as well as on load. Campfire is the identical
+format under a different home and shares this code path verbatim. Writing `parentSession` back
+out is not implemented yet — `from_common` never emits it.
+
 ## Caveats
 
 - **Branches flatten.** txcript does not walk the `id`/`parentId` tree; a
@@ -125,4 +135,4 @@ The authoritative txcript mapping is `src/harness/pi.rs`, exercised by
 `tests/integration/pi.rs` (store fidelity, discovery, tool normalization,
 codec fixpoint).
 
-Last verified: 2026-08-10, against src/harness/pi.rs and real local sessions.
+Last verified: 2026-09-26, against src/harness/pi.rs and real local sessions.

@@ -336,6 +336,7 @@ fn representable_common() -> Transcript<txcript::Common> {
         title: Some("Security deposit refund terms".into()),
         cli_version: Some("2.1.177".into()),
         model: Some("claude-opus-4-8".into()),
+        lineage: None,
     };
     let model = || Some("claude-opus-4-8".to_string());
     let body = vec![

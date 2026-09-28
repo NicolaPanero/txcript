@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
+use crate::common::{
+    Block, ImageSource, Lineage, Message, Meta, Relation, Role, StopReason, Tool, ToolOutput, Usage,
+};
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
@@ -54,6 +56,14 @@ pub struct SessionHeader {
     pub timestamp: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Set by pi's `/fork` and `/clone`: an absolute path to the parent
+    /// session's own `.jsonl` file.
+    #[serde(
+        rename = "parentSession",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_session: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -276,6 +286,9 @@ pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Reco
         id: session_id.clone(),
         timestamp: Some(meta.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)),
         cwd: meta.cwd.clone(),
+        // Not written back yet (see `Meta::lineage`'s doc comment): a
+        // converted or continued session isn't itself a `/fork`/`/clone`.
+        parent_session: None,
         extra: Map::from_iter([("version".into(), json!(3))]),
     }));
 
@@ -604,7 +617,9 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
         title: None,
         cli_version: None,
         model: None,
+        lineage: None,
     };
+    let mut parent_session: Option<String> = None;
     for record in records {
         match record {
             Record::Session(s) => {
@@ -613,6 +628,7 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
                 if let Some(ts) = s.timestamp.as_deref().and_then(parse_ts) {
                     meta.timestamp = ts;
                 }
+                parent_session.clone_from(&s.parent_session);
             }
             Record::Other(v) => match v.get("type").and_then(Value::as_str) {
                 // Latest model_change wins; model can switch mid-session.
@@ -636,7 +652,44 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
             Record::Message(_) | Record::Custom(_) => {}
         }
     }
+    // `parentSession` names the parent's file, not its id; resolving it
+    // needs a filesystem read, so it happens once here rather than in the
+    // fold above.
+    if let Some(path) = parent_session.as_deref().filter(|p| !p.is_empty()) {
+        meta.lineage = resolve_parent_session(path).map(|parent| Lineage {
+            parent,
+            relation: Relation::Fork,
+        });
+    }
     meta
+}
+
+/// Resolve pi/Campfire's `parentSession` header field — an absolute path to
+/// the parent session's own `.jsonl` file — to that session's id, the same
+/// way [`load_session`] derives one: the parent's own `session` header `id`,
+/// falling back to the filename-derived id when that's empty or the header
+/// can't be read. Reads only the parent's first line, not its whole body.
+fn resolve_parent_session(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    let first_line = fs::read_to_string(path).ok().and_then(|text| {
+        text.lines()
+            .find(|l| !l.trim().is_empty())
+            .map(String::from)
+    });
+    let header_id = first_line
+        .and_then(|line| serde_json::from_str::<Record>(&line).ok())
+        .and_then(|record| match record {
+            Record::Session(header) => Some(header.id),
+            Record::Message(_) | Record::Custom(_) | Record::Other(_) => None,
+        })
+        .filter(|id| !id.is_empty());
+    header_id.or_else(|| {
+        // The parent file may not exist (moved, deleted); a filename-derived
+        // id still requires the path to look like a session file.
+        path.extension()
+            .is_some_and(|ext| ext == "jsonl")
+            .then(|| jsonl::file_id(path))
+    })
 }
 
 /// pi/Campfire sessions-dir resolution: `<PREFIX>_CODING_AGENT_SESSION_DIR`

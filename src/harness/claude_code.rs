@@ -18,8 +18,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::common::{
-    Artifact, ArtifactSource, Block, ImageSource, Message, Meta, Role, StopReason, Tool,
-    ToolOutput, Usage,
+    Artifact, ArtifactSource, Block, ImageSource, Lineage, Message, Meta, Relation, Role,
+    StopReason, Tool, ToolOutput, Usage,
 };
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
@@ -67,6 +67,13 @@ pub struct EntryLine {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Set on every record of a teammate session Claude Code's team feature
+    /// starts: `"session-<first 8 hex of the lead's session id>"`.
+    #[serde(rename = "teamName", default, skip_serializing_if = "Option::is_none")]
+    pub team_name: Option<String>,
+    /// The teammate's name within its team, alongside `team_name`.
+    #[serde(rename = "agentName", default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub message: ApiMessage,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -286,6 +293,11 @@ pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Reco
             cwd: meta.cwd.clone(),
             git_branch: meta.git_branch.clone(),
             version: meta.cli_version.clone(),
+            // Team membership isn't written back yet (see `Meta::lineage`'s
+            // doc comment): a converted or continued session is never
+            // itself a teammate record.
+            team_name: None,
+            agent_name: None,
             message: api,
             extra: Map::new(),
         };
@@ -440,6 +452,32 @@ impl ClaudeStore {
             }
         }
     }
+
+    /// [`resolve_team_lineage`]'s resolution, for a single already-loaded
+    /// session rather than a whole `discover` pass: candidates come from
+    /// sibling session *filenames*, not their contents, since re-parsing
+    /// every session in the store just to resolve one teammate's lineage on
+    /// `load` would undercut the point of a targeted load. A session's
+    /// filename is its id unless the file was renamed by hand — the same
+    /// assumption this store's own empty-id fallback already makes.
+    fn resolve_team_lead(&self, prefix: &str, exclude_id: &str) -> Option<String> {
+        let mut files = Vec::new();
+        Self::collect_jsonl(&self.root, &mut files);
+        let mut found: Option<String> = None;
+        for path in &files {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.len() < 8 || stem == exclude_id || !stem[..8].eq_ignore_ascii_case(prefix) {
+                continue;
+            }
+            if found.is_some() {
+                return None; // ambiguous: more than one candidate matches
+            }
+            found = Some(stem.to_string());
+        }
+        found
+    }
 }
 
 impl Store for ClaudeStore {
@@ -453,20 +491,36 @@ impl Store for ClaudeStore {
             // Unlike a codex rollout, a session's metadata is spread over
             // the whole file — a custom title or summary can be its last
             // line — so the scan cannot stop early. It fans out instead.
-            Ok(super::filter_map_parallel(&files, |path| {
-                // A session that fails to read is skipped, not fatal. Meta
-                // comes from the shallow scan, not a full parse.
-                fs::read_to_string(path).ok().map(|text| {
-                    let mut meta = meta_from_text(&text);
-                    if meta.id.is_empty() {
-                        meta.id = jsonl::file_id(path);
-                    }
-                    Discovered {
-                        meta,
-                        reference: path.clone(),
-                    }
-                })
-            }))
+            let scanned: Vec<(Discovered<PathBuf>, Option<String>)> =
+                super::filter_map_parallel(&files, |path| {
+                    // A session that fails to read is skipped, not fatal. Meta
+                    // comes from the shallow scan, not a full parse.
+                    fs::read_to_string(path).ok().map(|text| {
+                        let records = scan_records(&text);
+                        let mut meta = meta_from_records(&records);
+                        if meta.id.is_empty() {
+                            meta.id = jsonl::file_id(path);
+                        }
+                        let hint = team_lead_prefix(&records);
+                        (
+                            Discovered {
+                                meta,
+                                reference: path.clone(),
+                            },
+                            hint,
+                        )
+                    })
+                });
+            let mut out = Vec::with_capacity(scanned.len());
+            let mut hints = Vec::with_capacity(scanned.len());
+            for (discovered, hint) in scanned {
+                out.push(discovered);
+                hints.push(hint);
+            }
+            // Teammate lineage needs every session's id, so it resolves once
+            // here rather than per file above.
+            resolve_team_lineage(&mut out, &hints);
+            Ok(out)
         } else {
             // A missing root means no sessions, not an error.
             Ok(Vec::new())
@@ -477,6 +531,15 @@ impl Store for ClaudeStore {
         let mut transcript = ClaudeCode::from_text(&fs::read_to_string(reference)?)?;
         if transcript.meta.id.is_empty() {
             transcript.meta.id = jsonl::file_id(reference);
+        }
+        if transcript.meta.lineage.is_none()
+            && let Some(prefix) = team_lead_prefix(&transcript.body)
+            && let Some(parent) = self.resolve_team_lead(&prefix, &transcript.meta.id)
+        {
+            transcript.meta.lineage = Some(Lineage {
+                parent,
+                relation: Relation::Spawn,
+            });
         }
         Ok(transcript)
     }
@@ -799,6 +862,8 @@ fn local_command_record<'a>(
                 cwd: meta.cwd.clone(),
                 git_branch: meta.git_branch.clone(),
                 version: meta.cli_version.clone(),
+                team_name: None,
+                agent_name: None,
                 message: ApiMessage {
                     role: Some("user".to_string()),
                     content: Value::String(body),
@@ -1221,6 +1286,10 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
         title: None,
         cli_version: None,
         model: None,
+        // Teammate lineage (`teamName`/`agentName`) needs the store's full id
+        // index to resolve the lead's session id; that happens in
+        // `ClaudeStore::discover`/`load`, not in this pure fold.
+        lineage: None,
     };
     let mut summary: Option<String> = None;
     let mut custom_title: Option<String> = None;
@@ -1303,6 +1372,10 @@ struct MetaEntryLine {
     git_branch: Option<String>,
     #[serde(default)]
     version: Option<String>,
+    #[serde(rename = "teamName", default)]
+    team_name: Option<String>,
+    #[serde(rename = "agentName", default)]
+    agent_name: Option<String>,
     message: MetaApiMessage,
 }
 
@@ -1331,6 +1404,8 @@ impl From<MetaEntryLine> for EntryLine {
             cwd: m.cwd,
             git_branch: m.git_branch,
             version: m.version,
+            team_name: m.team_name,
+            agent_name: m.agent_name,
             message: ApiMessage {
                 role: m.message.role,
                 content: Value::Null,
@@ -1396,15 +1471,74 @@ fn scan_line(line: &str) -> Option<Record> {
     }
 }
 
+fn scan_records(text: &str) -> Vec<Record> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(scan_line)
+        .collect()
+}
+
 /// [`meta_from_records`] over a shallow scan of the raw text — equivalent to
 /// `from_text(text)?.meta`, but discovery never builds message payloads.
 pub(crate) fn meta_from_text(text: &str) -> Meta {
-    let records: Vec<Record> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(scan_line)
-        .collect();
-    meta_from_records(&records)
+    meta_from_records(&scan_records(text))
+}
+
+/// The teammate lineage hint a session's records carry, unresolved: the
+/// lead's session-id prefix embedded in `teamName`, when some record also
+/// carries `agentName` (both fields together identify a teammate record
+/// Claude Code's team feature writes; requiring both keeps an unrelated
+/// `teamName`-shaped value from being read as one). `teamName` must be
+/// exactly `"session-"` plus 8 lowercase hex digits — anything else doesn't
+/// name a session and is left alone rather than guessed at.
+///
+/// Resolving the prefix to the lead's actual session id needs the store's
+/// full id index, which this pure fold doesn't have — see
+/// [`ClaudeStore::discover`] and [`ClaudeStore::resolve_team_lead`].
+pub(crate) fn team_lead_prefix(records: &[Record]) -> Option<String> {
+    records.iter().find_map(|record| {
+        let entry = match record {
+            Record::User(e) | Record::Assistant(e) => Some(e),
+            Record::Summary(_) | Record::Other(_) => None,
+        }?;
+        let team_name = entry.team_name.as_deref()?;
+        entry.agent_name.as_deref()?;
+        let hex = team_name.strip_prefix("session-")?;
+        (hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    })
+}
+
+/// Resolve every discovered session's teammate hint (from `hints`,
+/// positionally aligned with `out`) against the ids [`discover`] just found
+/// in the same pass. A hint resolves only when it matches exactly one other
+/// session's id prefix; no match, or more than one, leaves lineage `None` —
+/// per the design, an ambiguous prefix is not guessed at.
+fn resolve_team_lineage(out: &mut [Discovered<PathBuf>], hints: &[Option<String>]) {
+    let mut by_prefix: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, discovered) in out.iter().enumerate() {
+        if discovered.meta.id.len() >= 8 {
+            by_prefix
+                .entry(discovered.meta.id[..8].to_ascii_lowercase())
+                .or_default()
+                .push(index);
+        }
+    }
+    for (index, hint) in hints.iter().enumerate() {
+        let Some(prefix) = hint else { continue };
+        let Some(candidates) = by_prefix.get(prefix) else {
+            continue;
+        };
+        let mut others = candidates.iter().filter(|&&j| j != index);
+        let Some(&lead) = others.next() else { continue };
+        if others.next().is_some() {
+            continue; // ambiguous: more than one session shares the prefix
+        }
+        out[index].meta.lineage = Some(Lineage {
+            parent: out[lead].meta.id.clone(),
+            relation: Relation::Spawn,
+        });
+    }
 }
 
 /// Claude's project-dir encoding: every `/` and `.` becomes `-`. Windows
@@ -1447,5 +1581,97 @@ fn unconvertible(detail: impl Into<String>) -> Error {
     Error::Unconvertible {
         harness: ClaudeCode::NAME,
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod team_lead_prefix_tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::{ApiMessage, EntryLine, Record, team_lead_prefix};
+    use serde_json::{Map, Value, json};
+
+    fn entry(team_name: Option<&str>, agent_name: Option<&str>) -> EntryLine {
+        EntryLine {
+            parent_uuid: None,
+            uuid: "u1".into(),
+            timestamp: None,
+            session_id: Some("session-under-test".into()),
+            cwd: None,
+            git_branch: None,
+            version: None,
+            team_name: team_name.map(String::from),
+            agent_name: agent_name.map(String::from),
+            message: ApiMessage {
+                role: Some("user".into()),
+                content: Value::String("hi".into()),
+                model: None,
+                stop_reason: None,
+                usage: None,
+                extra: Map::new(),
+            },
+            extra: Map::new(),
+        }
+    }
+
+    /// No `teamName` at all: nothing to resolve.
+    #[test]
+    fn no_field_means_no_hint() {
+        let records = vec![Record::User(entry(None, None))];
+        assert!(team_lead_prefix(&records).is_none());
+    }
+
+    /// `teamName` without `agentName` doesn't identify a teammate record.
+    #[test]
+    fn team_name_without_agent_name_is_ignored() {
+        let records = vec![Record::User(entry(Some("session-35838766"), None))];
+        assert!(team_lead_prefix(&records).is_none());
+    }
+
+    /// Both fields present, correctly shaped: the 8-hex prefix comes back.
+    #[test]
+    fn team_name_with_agent_name_yields_the_prefix() {
+        let records = vec![Record::User(entry(Some("session-35838766"), Some("tr-ru")))];
+        assert_eq!(team_lead_prefix(&records).as_deref(), Some("35838766"));
+    }
+
+    /// A `teamName` that isn't `"session-" + 8 hex digits` names nothing —
+    /// the design calls for not guessing at an unrecognized shape.
+    #[test]
+    fn malformed_team_name_is_ignored() {
+        let records = vec![Record::User(entry(Some("session-not-hex!"), Some("a")))];
+        assert!(team_lead_prefix(&records).is_none());
+        let records = vec![Record::User(entry(Some("not-a-session-name"), Some("a")))];
+        assert!(team_lead_prefix(&records).is_none());
+    }
+
+    /// The hint is found on an assistant record too, and mixed case in
+    /// `teamName` normalizes to lowercase.
+    #[test]
+    fn assistant_record_carries_the_hint_and_hex_is_lowercased() {
+        let records = vec![Record::Assistant(entry(
+            Some("session-35838ABC"),
+            Some("a"),
+        ))];
+        assert_eq!(team_lead_prefix(&records).as_deref(), Some("35838abc"));
+    }
+
+    /// A record's raw JSON round-trips `teamName`/`agentName` — they aren't
+    /// silently absorbed into `extra` under a different key.
+    #[test]
+    fn team_fields_round_trip_through_json() {
+        let value = json!({
+            "type": "user",
+            "uuid": "u1",
+            "sessionId": "s1",
+            "teamName": "session-35838766",
+            "agentName": "tr-ru",
+            "message": {"role": "user", "content": "hi"},
+        });
+        let record = Record::from(value.clone());
+        assert!(
+            matches!(&record, Record::User(e) if e.team_name.as_deref() == Some("session-35838766") && e.agent_name.as_deref() == Some("tr-ru"))
+        );
+        assert_eq!(Value::from(record), value);
     }
 }
