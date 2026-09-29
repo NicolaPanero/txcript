@@ -23,7 +23,7 @@ pub(super) fn references(payload: &Value) -> Vec<FileRef> {
         }
         let name = name
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or("file"));
+            .unwrap_or_else(|| path.rsplit(['/', '\\']).next().unwrap_or("file"));
         files.insert(
             format!("path:{path}"),
             FileRef {
@@ -117,8 +117,11 @@ pub(super) fn references(payload: &Value) -> Vec<FileRef> {
                     other.key != file.key
                         && other.name == file.name
                         && (other.uuid.is_some()
-                            || (!path.contains('/')
-                                && other.path.as_deref().is_some_and(|path| path.contains('/'))))
+                            || (!path.contains(['/', '\\'])
+                                && other
+                                    .path
+                                    .as_deref()
+                                    .is_some_and(|path| path.contains(['/', '\\']))))
                 })
             })
         })
@@ -193,6 +196,23 @@ pub(super) fn media_type(name: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relocated_windows_attachment_replaces_the_old_manifest_name() {
+        let payload = serde_json::json!({"message":{"content":[
+            {"type":"text","text":"<uploaded_files><file_path>terms.pdf</file_path></uploaded_files>"},
+            {"type":"tool_use","name":"Artifact","input":{"file_path":r"C:\Users\test\uploads\copy\terms.pdf"}}
+        ]}});
+        let files = super::references(&payload);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "terms.pdf");
+        assert!(
+            files[0]
+                .path
+                .as_ref()
+                .is_some_and(|path| path.starts_with("C:"))
+        );
+    }
+
     #[test]
     fn uploaded_manifest_and_file_id_are_one_attachment() {
         let payload = serde_json::json!({
