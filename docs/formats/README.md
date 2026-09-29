@@ -40,6 +40,7 @@ than none.
 | Document | Harness | Parser |
 | --- | --- | --- |
 | [claude-code.md](claude-code.md) | Claude Code (Anthropic) | `src/harness/claude_code.rs` |
+| [cowork-remote.md](cowork-remote.md) | Cloud Cowork (Anthropic) | `src/harness/cowork_remote.rs` |
 | [claude-chat.md](claude-chat.md) | Claude Chat (Anthropic) | `src/harness/claude_chat.rs` |
 | [chatgpt.md](chatgpt.md) | ChatGPT (OpenAI) | `src/harness/chatgpt.rs` |
 | [cowork.md](cowork.md) | Cowork (Claude desktop app) | `src/harness/cowork.rs` |

@@ -271,7 +271,10 @@ impl SessionServer {
         let from = parse_from(request.from.as_deref())?;
         // Enumerating a live web account is not offered over MCP; the
         // refusal is explicit so an agent doesn't read "no sessions" as truth.
-        if matches!(from, Some(HarnessId::ClaudeChat | HarnessId::ChatGpt)) {
+        if matches!(
+            from,
+            Some(HarnessId::ClaudeChat | HarnessId::CoworkRemote | HarnessId::ChatGpt)
+        ) {
             let name = from.map_or("live source", HarnessId::as_str);
             return Err(ErrorData::invalid_params(
                 format!(
@@ -354,13 +357,7 @@ impl SessionServer {
         Parameters(request): Parameters<ReadSessionRequest>,
     ) -> Result<String, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
-        if let Some(loaded) = super::load_direct_claude_chat(&request.id, from) {
-            let (common, span_req) =
-                loaded.map_err(|error| ErrorData::internal_error(error, None))?;
-            let src = crate::fragment::parse_ref(&request.id).0;
-            return render_read_session(src, &common, span_req.as_ref());
-        }
-        if let Some(loaded) = super::load_direct_chatgpt(&request.id, from) {
+        if let Some((_, loaded)) = super::load_direct_remote(&request.id, from) {
             let (common, span_req) =
                 loaded.map_err(|error| ErrorData::internal_error(error, None))?;
             let src = crate::fragment::parse_ref(&request.id).0;
@@ -645,6 +642,20 @@ mod tests {
         assert_eq!(chunk_ranges(&[60, 60], 4, 100), [4..5, 5..6]);
         // Everything fitting the budget means one whole-span range.
         assert_eq!(chunk_ranges(&[10, 10], 0, 100), vec![0..2]);
+    }
+
+    #[test]
+    fn list_sessions_refuses_cowork_remote() {
+        let error = SessionServer::new(None)
+            .list_sessions(Parameters(ListSessionsRequest {
+                from: Some("cowork_remote".into()),
+                cwd: None,
+                limit: None,
+                offset: None,
+            }))
+            .err()
+            .unwrap_or_else(|| panic!("cowork_remote listing is refused"));
+        assert!(error.message.contains("does not enumerate cowork_remote"));
     }
 
     #[test]

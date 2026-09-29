@@ -35,10 +35,7 @@ pub fn load_source(
     source: &str,
     from: Option<HarnessId>,
 ) -> Result<(Transcript<Common>, Option<fragment::SpanReq>), String> {
-    if let Some(loaded) = super::load_direct_claude_chat(source, from) {
-        return loaded;
-    }
-    if let Some(loaded) = super::load_direct_chatgpt(source, from) {
+    if let Some((_, loaded)) = super::load_direct_remote(source, from) {
         return loaded;
     }
     let sessions = super::discover_with_spinner(from)?;
@@ -52,6 +49,8 @@ pub fn load_source(
     let session = super::find_session(&sessions, from, src)?.ok_or_else(|| {
         let (origin, scope) = if from == Some(HarnessId::ClaudeChat) {
             ("Claude Chat", String::new())
+        } else if from == Some(HarnessId::CoworkRemote) {
+            ("cloud Cowork", String::new())
         } else if from == Some(HarnessId::ChatGpt) {
             ("ChatGPT", String::new())
         } else {

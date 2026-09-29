@@ -282,6 +282,16 @@ fn push_native_message(
                 }
                 append_role_block(role, block, timestamp, out, &mut pending_role, &mut pending);
             }
+            if let Some(artifact) = authored_file(conversation, native, value, block_index) {
+                append_role_block(
+                    Role::Assistant,
+                    Block::Artifact { artifact },
+                    timestamp,
+                    out,
+                    &mut pending_role,
+                    &mut pending,
+                );
+            }
             if value.get("type").and_then(Value::as_str) == Some("tool_result") {
                 append_tool_result_artifacts(
                     conversation,
@@ -537,6 +547,67 @@ fn tool_result_block(
         content,
         is_error,
     }
+}
+
+/// Older chat artifacts and `create_file` tools carry the complete text in
+/// their inputs, even when no `local_resource/download` record was emitted.
+fn authored_file(
+    conversation: &Conversation,
+    message: &Value,
+    block: &Value,
+    index: usize,
+) -> Option<Artifact> {
+    if block["type"] != "tool_use" {
+        return None;
+    }
+    let input = &block["input"];
+    let (name, text, media_type) = match block["name"].as_str()? {
+        "create_file" => {
+            let path = input["path"].as_str()?;
+            let name = path.rsplit('/').next().filter(|name| !name.is_empty())?;
+            let mime = if std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                "text/markdown"
+            } else {
+                "text/plain"
+            };
+            (
+                name.to_string(),
+                input["file_text"].as_str()?,
+                mime.to_string(),
+            )
+        }
+        "artifacts" if matches!(input["command"].as_str(), Some("create" | "rewrite")) => {
+            let mime = input["type"].as_str().unwrap_or("text/plain");
+            let title = input["title"].as_str().unwrap_or("artifact");
+            let suffix = match mime {
+                "text/markdown" => ".md",
+                "text/html" => ".html",
+                "image/svg+xml" => ".svg",
+                _ => ".txt",
+            };
+            let name = if title.ends_with(suffix) {
+                title.to_string()
+            } else {
+                format!("{title}{suffix}")
+            };
+            (name, input["content"].as_str()?, mime.to_string())
+        }
+        _ => return None,
+    };
+    Some(Artifact {
+        id: input["version_uuid"].as_str().map_or_else(
+            || synthetic_block_id(conversation, message, index, "authored-file"),
+            str::to_string,
+        ),
+        name,
+        source: ArtifactSource::Text {
+            text: text.into(),
+            media_type: Some(media_type),
+        },
+    })
 }
 
 fn artifacts_from_tool_result(conversation: &Conversation, block: &Value) -> Vec<Artifact> {
@@ -930,6 +1001,8 @@ mod remote {
         accept: &'static str,
         headers: Vec<(&'static str, String)>,
         max_bytes: u64,
+        #[cfg(feature = "cowork_remote")]
+        timeline_body: Option<Vec<u8>>,
         reply: mpsc::SyncSender<std::result::Result<BrowserResponse, String>>,
     }
 
@@ -978,7 +1051,7 @@ mod remote {
                         return;
                     };
                     while let Ok(request) = receiver.recv() {
-                        let result = runtime.block_on(execute_get(&client, &request));
+                        let result = runtime.block_on(execute_read(&client, &request));
                         let _ = request.reply.send(result);
                     }
                 })
@@ -1015,6 +1088,8 @@ mod remote {
                     accept,
                     headers,
                     max_bytes,
+                    #[cfg(feature = "cowork_remote")]
+                    timeline_body: None,
                     reply,
                 })
                 .map_err(|_| Error::Remote {
@@ -1032,17 +1107,207 @@ mod remote {
                     detail,
                 })
         }
+
+        #[cfg(feature = "cowork_remote")]
+        fn cowork_timeline(
+            &self,
+            base_url: &str,
+            cookie: String,
+            headers: Vec<(&'static str, String)>,
+            conversation_id: &str,
+        ) -> Result<BrowserResponse> {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "conversationId": conversation_id,
+                "existingOnly": true,
+            }))?;
+            let length = u32::try_from(body.len())
+                .map_err(|_| protocol_error("timeline request exceeds the frame limit"))?;
+            let mut framed = vec![0];
+            framed.extend_from_slice(&length.to_be_bytes());
+            framed.extend_from_slice(&body);
+            let (reply, response) = mpsc::sync_channel(1);
+            self.sender
+                .send(BrowserRequest {
+                    url: format!("{base_url}{COWORK_TIMELINE_PATH}"),
+                    cookie,
+                    accept: "application/connect+json",
+                    headers,
+                    max_bytes: MAX_RESPONSE_BYTES,
+                    timeline_body: Some(framed),
+                    reply,
+                })
+                .map_err(|_| protocol_error("timeline worker stopped before the read"))?;
+            response
+                .recv()
+                .map_err(|_| protocol_error("timeline worker stopped during the read"))?
+                .map_err(|detail| Error::Remote {
+                    harness: ClaudeChat::NAME,
+                    detail,
+                })
+        }
     }
 
-    async fn execute_get(
+    #[cfg(feature = "cowork_remote")]
+    const COWORK_TIMELINE_PATH: &str =
+        "/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline";
+
+    // Connect streams start with heartbeats. Read only as far as the initial
+    // authoritative snapshot, then close the stream. Never follow updates or
+    // invoke PerformAction/ReportViewing. All server error details stay private.
+    #[cfg(feature = "cowork_remote")]
+    #[derive(Default)]
+    struct TimelineSnapshot {
+        bytes: Vec<u8>,
+        frames: usize,
+    }
+
+    #[cfg(feature = "cowork_remote")]
+    impl TimelineSnapshot {
+        fn push(
+            &mut self,
+            chunk: &[u8],
+            max_bytes: u64,
+        ) -> std::result::Result<Option<Vec<u8>>, String> {
+            self.bytes.extend_from_slice(chunk);
+            while self.bytes.len() >= 5 {
+                let flags = self.bytes[0];
+                let length = u32::from_be_bytes([
+                    self.bytes[1],
+                    self.bytes[2],
+                    self.bytes[3],
+                    self.bytes[4],
+                ]);
+                if u64::from(length) > max_bytes {
+                    return Err("Claude timeline frame exceeded the byte limit".into());
+                }
+                let end = usize::try_from(length)
+                    .ok()
+                    .and_then(|n| n.checked_add(5))
+                    .ok_or("Claude timeline frame length overflowed")?;
+                if self.bytes.len() < end {
+                    return Ok(None);
+                }
+                self.frames += 1;
+                if self.frames > 128 {
+                    return Err("Claude returned no snapshot within the frame limit".into());
+                }
+                if flags != 0 {
+                    return Err(
+                        "Claude ended or refused the timeline before a complete snapshot".into(),
+                    );
+                }
+                let value: Value = serde_json::from_slice(&self.bytes[5..end])
+                    .map_err(|_| "Claude returned an invalid timeline frame")?;
+                let event = value
+                    .get("event")
+                    .and_then(Value::as_object)
+                    .ok_or("Claude timeline frame is missing its event")?;
+                if event.contains_key("error") || event.contains_key("conversationDeleted") {
+                    return Err("Claude refused the existing conversation timeline".into());
+                }
+                if let Some(update) = event.get("update") {
+                    if update.get("replaceAllState").and_then(Value::as_bool) != Some(true)
+                        || update
+                            .pointer("/conversation/id")
+                            .and_then(Value::as_str)
+                            .is_none()
+                    {
+                        return Err(
+                            "Claude did not return an authoritative conversation snapshot".into(),
+                        );
+                    }
+                    return Ok(Some(self.bytes[5..end].to_vec()));
+                }
+                self.bytes.drain(..end);
+            }
+            Ok(None)
+        }
+    }
+
+    #[cfg(all(test, feature = "cowork_remote"))]
+    #[allow(clippy::unwrap_used)]
+    mod timeline_tests {
+        use super::*;
+        use serde_json::json;
+
+        fn frame(value: &Value) -> Vec<u8> {
+            let body = value.to_string().into_bytes();
+            let mut framed = vec![0];
+            framed.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+            framed.extend(body);
+            framed
+        }
+
+        #[test]
+        fn snapshot_handles_split_headers_payloads_and_heartbeats() {
+            let snapshot = json!({"event":{"update":{"replaceAllState":true,"conversation":{"id":"example"}}},"future":true});
+            let mut bytes = frame(&json!({"event":{"heartbeat":{}}}));
+            bytes.extend(frame(&snapshot));
+            for size in 1..=bytes.len() {
+                let mut parser = TimelineSnapshot::default();
+                let mut result = None;
+                for chunk in bytes.chunks(size) {
+                    result = parser.push(chunk, 4096).unwrap().or(result);
+                }
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&result.unwrap()).unwrap(),
+                    snapshot
+                );
+            }
+        }
+
+        #[test]
+        fn snapshot_rejects_errors_partial_state_and_unbounded_streams() {
+            for value in [
+                json!({"event":{"error":{"message":"secret"}}}),
+                json!({"event":{"conversationDeleted":{}}}),
+                json!({"event":{"update":{"conversation":{"id":"example"}}}}),
+                json!({"unexpected":true}),
+            ] {
+                let error = TimelineSnapshot::default()
+                    .push(&frame(&value), 4096)
+                    .unwrap_err();
+                assert!(!error.contains("secret"));
+            }
+            assert!(
+                TimelineSnapshot::default()
+                    .push(&[0, 255, 255, 255, 255], 4096)
+                    .is_err()
+            );
+            for flags in [1, 2, 3, 255] {
+                let mut bytes = frame(&json!({"error":{"message":"secret"}}));
+                bytes[0] = flags;
+                assert!(TimelineSnapshot::default().push(&bytes, 4096).is_err());
+            }
+            let bytes = frame(&json!({"event":{"heartbeat":{}}})).repeat(129);
+            assert!(TimelineSnapshot::default().push(&bytes, 65536).is_err());
+        }
+    }
+
+    fn build_read_request(
         client: &wreq::Client,
         request: &BrowserRequest,
-    ) -> std::result::Result<BrowserResponse, String> {
+    ) -> std::result::Result<wreq::RequestBuilder, String> {
         let mut cookie = wreq::header::HeaderValue::from_str(&request.cookie)
             .map_err(|_| "could not construct a safe Claude cookie header".to_string())?;
         cookie.set_sensitive(true);
-        let mut builder = client
-            .get(&request.url)
+        let builder = client.get(&request.url);
+        #[cfg(feature = "cowork_remote")]
+        let builder = if let Some(body) = &request.timeline_body {
+            // This is a read RPC with POST framing, not a general POST client.
+            // Its route and existing-only request are constructed above.
+            if !request.url.ends_with(COWORK_TIMELINE_PATH) {
+                return Err("invalid Cowork timeline read route".into());
+            }
+            client
+                .post(&request.url)
+                .body(body.clone())
+                .header("content-type", "application/connect+json")
+                .header("connect-protocol-version", "1")
+        } else {
+            builder
+        };
+        let mut builder = builder
             .header(wreq::header::COOKIE, cookie)
             .header(wreq::header::ACCEPT, request.accept)
             .header("referer", "https://claude.ai/new")
@@ -1055,6 +1320,14 @@ mod remote {
             value.set_sensitive(true);
             builder = builder.header(*name, value);
         }
+        Ok(builder)
+    }
+
+    async fn execute_read(
+        client: &wreq::Client,
+        request: &BrowserRequest,
+    ) -> std::result::Result<BrowserResponse, String> {
+        let builder = build_read_request(client, request)?;
         let response = builder
             .send()
             .await
@@ -1080,20 +1353,47 @@ mod remote {
             ));
         }
         let mut body = Vec::new();
+        let mut total_bytes = 0_u64;
+        #[cfg(feature = "cowork_remote")]
+        let mut timeline = (request.timeline_body.is_some() && (200..300).contains(&status))
+            .then(TimelineSnapshot::default);
+        #[cfg(feature = "cowork_remote")]
+        if timeline.is_some()
+            && !content_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("application/connect+json"))
+        {
+            return Err("Claude returned an unexpected timeline content type".into());
+        }
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk =
                 chunk.map_err(|error| format!("failed reading Claude response: {error}"))?;
-            let length = u64::try_from(body.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-            if length > request.max_bytes {
+            total_bytes =
+                total_bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+            if total_bytes > request.max_bytes {
                 return Err(format!(
                     "Claude response exceeded the {} byte limit",
                     request.max_bytes
                 ));
             }
+            #[cfg(feature = "cowork_remote")]
+            if let Some(snapshot) = &mut timeline {
+                if let Some(body) = snapshot.push(&chunk, request.max_bytes)? {
+                    return Ok(BrowserResponse {
+                        status,
+                        content_type,
+                        cf_mitigated,
+                        body,
+                    });
+                }
+                continue;
+            }
             body.extend_from_slice(&chunk);
+        }
+        #[cfg(feature = "cowork_remote")]
+        if timeline.is_some() {
+            return Err("Claude timeline ended before a complete snapshot".into());
         }
         Ok(BrowserResponse {
             status,
@@ -1166,6 +1466,18 @@ mod remote {
             organization_uuid: Option<String>,
         ) -> Result<ClaudeChatRef> {
             validate_uuid("conversation", &conversation_uuid)?;
+            let organization_uuid = self.resolve_organization(organization_uuid)?;
+            Ok(ClaudeChatRef {
+                organization_uuid,
+                conversation_uuid,
+                updated_at: None,
+            })
+        }
+
+        pub(crate) fn resolve_organization(
+            &self,
+            organization_uuid: Option<String>,
+        ) -> Result<String> {
             let organization_uuid = organization_uuid
                 .or_else(|| self.organization_uuid.clone())
                 .or_else(|| self.active_organization_uuid.clone())
@@ -1174,11 +1486,7 @@ mod remote {
                     detail: "Claude Desktop has no current organization; open Claude Desktop and select the account or organization containing this chat".to_string(),
                 })?;
             validate_uuid("organization", &organization_uuid)?;
-            Ok(ClaudeChatRef {
-                organization_uuid,
-                conversation_uuid,
-                updated_at: None,
-            })
+            Ok(organization_uuid)
         }
 
         fn build(
@@ -1247,7 +1555,7 @@ mod remote {
             Ok(organizations)
         }
 
-        fn organizations(&self) -> Result<Vec<String>> {
+        pub(crate) fn organizations(&self) -> Result<Vec<String>> {
             if let Some(id) = &self.organization_uuid {
                 return Ok(vec![id.clone()]);
             }
@@ -1258,7 +1566,7 @@ mod remote {
         }
 
         #[cfg(test)]
-        fn for_test(
+        pub(crate) fn for_test(
             session_key: &str,
             organization_uuid: Option<String>,
             base_url: String,
@@ -1443,14 +1751,88 @@ mod remote {
         }
 
         fn get_json_with_cookie(&self, path: &str, cookie: String) -> Result<Value> {
-            let url = format!("{}{path}", self.base_url);
+            self.get_json_with_headers(path, cookie, self.request_headers())
+        }
+
+        // Share Desktop authentication and the bounded, redirect-free GET
+        // transport with Cowork. Only code-session routes are accepted here.
+        #[cfg(feature = "cowork_remote")]
+        pub(crate) fn get_code_json(&self, path: &str, organization: &str) -> Result<Value> {
+            validate_uuid("organization", organization)?;
+            if !path.starts_with("/v1/code/sessions?") && !path.starts_with("/v1/code/sessions/") {
+                return Err(protocol_error("invalid code-session route"));
+            }
+            let mut headers = self.request_headers();
+            headers.extend([
+                ("anthropic-version", "2023-06-01".to_string()),
+                ("anthropic-beta", "ccr-byoc-2025-07-29".to_string()),
+                ("anthropic-client-feature", "ccr".to_string()),
+                ("x-organization-uuid", organization.to_string()),
+            ]);
+            self.get_json_with_headers(path, self.cookie_header(), headers)
+        }
+
+        /// Download only a file explicitly carried by this Cowork session.
+        #[cfg(feature = "cowork_remote")]
+        pub(crate) fn cowork_file(
+            &self,
+            organization: &str,
+            session: &str,
+            file: Option<&str>,
+            path: Option<&str>,
+        ) -> Result<(Vec<u8>, Option<String>)> {
+            validate_uuid("organization", organization)?;
+            let session = crate::harness::cowork_remote::normalize_id(session)?;
+            let route = if let Some(file) = file {
+                validate_uuid("file", file)?;
+                format!("/api/organizations/{organization}/files/{file}/contents")
+            } else if let Some(path) = path {
+                format!(
+                    "/api/organizations/{organization}/cowork/sessions/{session}/download-file?path={}",
+                    encode_query_component(path)
+                )
+            } else {
+                return Err(protocol_error("file has no download reference"));
+            };
             let response = self.agent.get(
-                url,
-                cookie,
-                "application/json",
+                format!("{}{route}", self.base_url),
+                self.cookie_header(),
+                "application/octet-stream,*/*;q=0.8",
                 self.request_headers(),
-                MAX_RESPONSE_BYTES,
+                MAX_FILE_BYTES,
             )?;
+            if !(200..300).contains(&response.status) {
+                return Err(remote_error(&response));
+            }
+            Ok((response.body, response.content_type))
+        }
+
+        #[cfg(feature = "cowork_remote")]
+        pub(crate) fn cowork_chat_snapshot(&self, id: &str, organization: &str) -> Result<Value> {
+            validate_uuid("organization", organization)?;
+            validate_uuid("conversation", id)?;
+            let mut headers = self.request_headers();
+            headers.push(("x-organization-uuid", organization.to_string()));
+            let response =
+                self.agent
+                    .cowork_timeline(&self.base_url, self.cookie_header(), headers, id)?;
+            if !(200..300).contains(&response.status) {
+                return Err(remote_error(&response));
+            }
+            serde_json::from_slice(&response.body)
+                .map_err(|_| protocol_error("Claude returned invalid snapshot JSON"))
+        }
+
+        fn get_json_with_headers(
+            &self,
+            path: &str,
+            cookie: String,
+            headers: Vec<(&'static str, String)>,
+        ) -> Result<Value> {
+            let url = format!("{}{path}", self.base_url);
+            let response =
+                self.agent
+                    .get(url, cookie, "application/json", headers, MAX_RESPONSE_BYTES)?;
             if !(200..300).contains(&response.status) {
                 return Err(remote_error(&response));
             }
@@ -2814,6 +3196,39 @@ mod codec_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn research_reports_and_create_file_text_survive_as_named_files() {
+        let value = json!({"uuid":"11111111-1111-4111-8111-111111111111","created_at":"2026-01-01T00:00:00Z",
+        "chat_messages":[{"uuid":"22222222-2222-4222-8222-222222222222","sender":"assistant","content":[
+            {"type":"tool_use","name":"artifacts","input":{"command":"create","id":"report","version_uuid":"version-1","title":"Research","type":"text/markdown","content":"# Report\nExact bytes: 世界\n"}},
+            {"type":"tool_use","name":"create_file","input":{"path":"/mnt/user-data/outputs/notes.md","file_text":"# Notes\n"}},
+            {"type":"tool_use","name":"artifacts","input":{"command":"update","id":"report","old_str":"Report","new_str":"Report 2"}}
+        ]}]});
+        let native = ClaudeChat::from_text(&value.to_string()).expect("fixture parses");
+        let common = ClaudeChat::to_common(&native).expect("converts");
+        let files = common
+            .body
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                Block::Artifact { artifact } => Some(artifact),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "Research.md");
+        assert_eq!(files[0].id, "version-1");
+        assert!(
+            matches!(&files[0].source, ArtifactSource::Text { text, .. } if text == "# Report\nExact bytes: 世界\n")
+        );
+        assert_eq!(files[1].name, "notes.md");
+        assert_eq!(
+            ClaudeChat::from_text(&ClaudeChat::to_text(&native).expect("serializes"))
+                .expect("parses"),
+            native
+        );
+    }
 
     #[test]
     fn data_export_arrays_are_refused() {

@@ -121,10 +121,11 @@ Each name links to its format documentation. Use the ID with `--from` and `--wit
 | [Antigravity](docs/formats/antigravity.md) | `antigravity` | Yes | Yes |
 | [Hermes Agent](docs/formats/hermes.md) | `hermes` | Yes | No |
 | [Amp](docs/formats/amp.md) | `amp` | Yes | No |
+| [Cloud Cowork](docs/formats/cowork-remote.md) | `cowork_remote` | Live account | No |
 | [Claude Chat](docs/formats/claude-chat.md) | `claude_chat` | Live account | No |
 | [ChatGPT](docs/formats/chatgpt.md) | `chatgpt` | Live account | No |
 
-Local discovery skips the live accounts. Select `--from claude_chat` or `--from chatgpt` explicitly to read them. These sources use private web APIs and reuse an existing app login; requirements and limitations are in their linked docs.
+Local discovery skips the live accounts. Select `--from claude_chat`, `--from cowork_remote`, or `--from chatgpt` explicitly to read them. These sources use private web APIs and reuse an existing app login; requirements and limitations are in their linked docs.
 
 ### Bring another agent
 

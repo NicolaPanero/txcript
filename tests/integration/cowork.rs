@@ -160,6 +160,7 @@ fn write_fixture(root: &std::path::Path) -> std::path::PathBuf {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::create_dir_all(dir.join("outputs")).unwrap();
     std::fs::create_dir_all(dir.join("uploads")).unwrap();
+    std::fs::write(dir.join("uploads/terms.pdf"), b"%PDF-test\0\xff").unwrap();
     std::fs::write(project.join(format!("{CLI_ID}.jsonl")), transcript_jsonl()).unwrap();
     // A subagent transcript sits beside the main one and is not a session.
     let sub = project.join(CLI_ID).join("subagents");
@@ -267,7 +268,10 @@ fn to_common_extracts_the_claude_code_conversation() {
     // The prompt keeps Cowork's <uploaded_files> manifest: it is what the
     // model saw and names the attachment, not boilerplate.
     assert_eq!(msgs[0].role, Role::User);
-    assert_eq!(msgs[0].content.len(), 2);
+    assert_eq!(msgs[0].content.len(), 3);
+    assert!(
+        matches!(&msgs[0].content[2], Block::Artifact { artifact } if artifact.name == "terms.pdf")
+    );
     assert_eq!(msgs[0].content[0], png_image_block());
     assert!(matches!(
         &msgs[0].content[1],
@@ -675,4 +679,83 @@ fn fingerprints_follow_the_transcript() {
     let key = record.to_string_lossy().into_owned();
     assert_ne!(before[&key], after[&key]);
     assert!(!after[&key].is_empty());
+}
+
+#[test]
+fn missing_local_attachment_is_not_silently_exported() {
+    let root = TempDir::new().unwrap();
+    let record = write_fixture(root.path());
+    std::fs::remove_file(
+        root.path()
+            .join(ORG)
+            .join(ACCOUNT)
+            .join(SESSION_ID)
+            .join("uploads/terms.pdf"),
+    )
+    .unwrap();
+    let error = CoworkStore::new(root.path())
+        .load(&record)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("terms.pdf") && error.contains("missing"));
+}
+
+fn find(path: &std::path::Path, expected: &[u8]) -> bool {
+    std::fs::read_dir(path).unwrap().flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            find(&path, expected)
+        } else {
+            std::fs::read(&path).unwrap() == expected
+        }
+    })
+}
+
+#[test]
+fn files_survive_simple_and_continuation_to_cowork_and_codex() {
+    use base64::Engine;
+    use txcript::harness::simple::Simple;
+    use txcript::{Common, HarnessId};
+    let root = TempDir::new().unwrap();
+    let record = write_fixture(root.path());
+    let common = Cowork::to_common(&CoworkStore::new(root.path()).load(&record).unwrap()).unwrap();
+    let simple = txcript::convert::<Common, Simple>(&common).unwrap();
+    let text = Simple::to_text(&simple).unwrap();
+    let recovered = Simple::to_common(&Simple::from_text(&text).unwrap()).unwrap();
+    let Block::Artifact { artifact } = &recovered.body[0].content[2] else {
+        panic!("missing attachment")
+    };
+    let txcript::common::ArtifactSource::Base64 { data, .. } = &artifact.source else {
+        panic!("missing bytes")
+    };
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    // Prove continuation uses carried contents after the source has disappeared.
+    drop(root);
+    for target in [HarnessId::Cowork, HarnessId::Codex, HarnessId::ClaudeCode] {
+        let dst = TempDir::new().unwrap();
+        if target == HarnessId::Cowork {
+            std::fs::create_dir_all(dst.path().join(ORG).join(ACCOUNT)).unwrap();
+        }
+        let written = txcript::local::write(target, &recovered, Some(dst.path())).unwrap();
+        assert!(!written.id.is_empty());
+        assert!(
+            find(dst.path(), &expected),
+            "{target} did not save file bytes"
+        );
+        if target == HarnessId::Cowork {
+            let loaded = CoworkStore::new(dst.path())
+                .load(&written.location.into())
+                .unwrap();
+            let result = Cowork::to_common(&loaded).unwrap();
+            assert!(
+                result
+                    .body
+                    .iter()
+                    .flat_map(|m| &m.content)
+                    .any(|b| matches!(b, Block::Artifact { .. }))
+            );
+        }
+    }
 }

@@ -26,7 +26,7 @@
 //!   missing logs are both valid states for it).
 //!
 //! Not carried: the per-task `.claude/.claude.json` config cache and its
-//! backups, `uploads/` and `outputs/` (the user's files), subagent
+//! backups, unreferenced files under `uploads/` and `outputs/`, subagent
 //! transcripts under `<cliSessionId>/subagents/`, and `debug/`.
 //!
 //! `to_common` is the Claude Code mapping over the transcript; the header
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use uuid::Uuid;
 
-use crate::common::{Block, Message, Meta, Role};
+use crate::common::{Artifact, ArtifactSource, Block, Message, Meta, Role};
 use crate::error::{Error, Result};
 use crate::harness::claude_code::{self, Record};
 use crate::harness::jsonl;
@@ -73,6 +73,8 @@ pub struct CoworkSession {
     pub transcript: Vec<Record>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub audit: Vec<Value>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub files: std::collections::BTreeMap<String, Artifact>,
 }
 
 /// The app's session record (`local_<id>.json`). Only the fields the codec
@@ -124,12 +126,19 @@ pub struct Header {
 
 impl Codec for Cowork {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
+        let records = transcript
+            .body
+            .transcript
+            .iter()
+            .map(|record| {
+                let mut payload = serde_json::to_value(record)?;
+                super::cowork_files::attach(&mut payload, &transcript.body.files)?;
+                Ok(Record::from(payload))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Transcript::new(
             transcript.meta.clone(),
-            claude_code::records_to_messages(
-                &transcript.body.transcript,
-                transcript.meta.timestamp,
-            ),
+            claude_code::records_to_messages(&records, transcript.meta.timestamp),
         ))
     }
 
@@ -214,6 +223,7 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> (Meta, CoworkSession
             header,
             transcript,
             audit: Vec::new(),
+            files: std::collections::BTreeMap::new(),
         },
     )
 }
@@ -356,7 +366,7 @@ impl CoworkStore {
     /// The account tree `save` writes into: the one whose newest session
     /// record is most recent (the account the app is using), else the only
     /// one there is.
-    fn active_account_dir(&self) -> Result<PathBuf> {
+    pub(crate) fn active_account_dir(&self) -> Result<PathBuf> {
         let newest_record = |dir: &Path| {
             session_files(dir)
                 .iter()
@@ -487,11 +497,17 @@ impl Store for CoworkStore {
         let audit = fs::read_to_string(dir.join("audit.jsonl"))
             .map(|text| jsonl::parse(&text))
             .unwrap_or_default();
-        let body = CoworkSession {
+        let mut body = CoworkSession {
             header,
             transcript,
             audit,
+            files: if dir.join(".txcript-files.json").exists() {
+                serde_json::from_slice(&fs::read(dir.join(".txcript-files.json"))?)?
+            } else {
+                std::collections::BTreeMap::new()
+            },
         };
+        hydrate_local_files(&dir, &mut body)?;
         let mut meta = meta_from_body(&body);
         if meta.id.is_empty() {
             meta.id = jsonl::file_id(reference);
@@ -541,6 +557,12 @@ impl Store for CoworkStore {
         )?;
         if !body.audit.is_empty() {
             fs::write(dir.join("audit.jsonl"), jsonl::render(&body.audit)?)?;
+        }
+        if !body.files.is_empty() {
+            fs::write(
+                dir.join(".txcript-files.json"),
+                serde_json::to_vec(&body.files)?,
+            )?;
         }
         fs::write(&record, serde_json::to_string(&body.header)?)?;
         Ok(Saved {
@@ -599,4 +621,89 @@ impl Store for CoworkStore {
         }
         Ok(out)
     }
+}
+
+/// Resolve only explicit attachment references within this session's file roots.
+fn hydrate_local_files(dir: &Path, body: &mut CoworkSession) -> Result<()> {
+    use base64::Engine;
+    use std::io::Read;
+    let mut total = 0_usize;
+    for record in &body.transcript {
+        let payload = serde_json::to_value(record)?;
+        for file in super::cowork_files::references(&payload) {
+            if body.files.contains_key(&file.key) {
+                continue;
+            }
+            let path = file.path.as_deref().unwrap_or(&file.name);
+            let relative = Path::new(path)
+                .strip_prefix(dir)
+                .ok()
+                .and_then(|path| path.to_str())
+                .or_else(|| path.strip_prefix("/mnt/user-data/"))
+                .or_else(|| {
+                    body.header
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| path.strip_prefix(cwd))
+                        .and_then(|rest| rest.strip_prefix('/'))
+                })
+                .unwrap_or(path);
+            let relative = Path::new(relative);
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(super::cowork_files::error(&format!(
+                    "Could not include {}: file is outside the session's uploads/outputs",
+                    file.name
+                )));
+            }
+            let candidates = if relative.starts_with("uploads") || relative.starts_with("outputs") {
+                vec![dir.join(relative)]
+            } else {
+                vec![
+                    dir.join("uploads").join(relative),
+                    dir.join("outputs").join(relative),
+                ]
+            };
+            let allowed = [dir.join("uploads"), dir.join("outputs")]
+                .into_iter()
+                .filter_map(|path| path.canonicalize().ok())
+                .collect::<Vec<_>>();
+            let resolved = candidates
+                .into_iter()
+                .filter_map(|path| path.canonicalize().ok())
+                .filter(|path| path.is_file() && allowed.iter().any(|root| path.starts_with(root)))
+                .collect::<Vec<_>>();
+            if resolved.len() != 1 {
+                return Err(super::cowork_files::error(&format!(
+                    "Could not include {}: file is missing or ambiguous in the local Cowork cache",
+                    file.name
+                )));
+            }
+            let mut bytes = Vec::new();
+            fs::File::open(&resolved[0])?
+                .take(64 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            total = total.saturating_add(bytes.len());
+            if bytes.len() > 64 * 1024 * 1024 || total > 128 * 1024 * 1024 {
+                return Err(super::cowork_files::error(
+                    "Cowork attachments exceed the file size limit",
+                ));
+            }
+            body.files.insert(
+                file.key.clone(),
+                Artifact {
+                    id: file.key,
+                    name: file.name.clone(),
+                    source: ArtifactSource::Base64 {
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        media_type: super::cowork_files::media_type(&file.name).map(str::to_string),
+                    },
+                },
+            );
+        }
+    }
+    Ok(())
 }
