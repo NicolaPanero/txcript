@@ -1177,8 +1177,41 @@ fn serialize_tool_output(out: &ToolOutput) -> Value {
         // in `tool_result.content`; a bare object fails the whole session
         // load on resume. Keep block arrays (Claude's own native shape),
         // flatten any other JSON to its compact text.
-        ToolOutput::Json(v) if is_block_array(v) => v.clone(),
+        ToolOutput::Json(v) if is_block_array(v) => {
+            let mut blocks = v.clone();
+            strip_tool_result_block_uuids(&mut blocks);
+            blocks
+        }
         ToolOutput::Json(v) => Value::String(v.to_string()),
+    }
+}
+
+/// Claude.ai annotates content blocks with `uuid`, which the Messages API
+/// rejects. Remove it only from block envelopes, including nested content;
+/// arbitrary tool JSON and strings may contain meaningful UUIDs. Native
+/// load/save and the Common payload remain untouched.
+fn strip_tool_result_block_uuids(value: &mut Value) {
+    let Some(blocks) = value.as_array_mut() else {
+        return;
+    };
+    for block in blocks {
+        let Some(object) = block.as_object_mut() else {
+            continue;
+        };
+        object.remove("uuid");
+        if let Some(content) = object.get_mut("content")
+            && is_block_array(content)
+        {
+            strip_tool_result_block_uuids(content);
+        }
+        if object.get("type").and_then(Value::as_str) == Some("document")
+            && let Some(source) = object.get_mut("source")
+            && source.get("type").and_then(Value::as_str) == Some("content")
+            && let Some(content) = source.get_mut("content")
+            && is_block_array(content)
+        {
+            strip_tool_result_block_uuids(content);
+        }
     }
 }
 

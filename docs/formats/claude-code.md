@@ -116,6 +116,10 @@ that relation here. `from_common` never writes `teamName`/`agentName` back.
   types are gone after a cross-model trip (same-harness native trips keep everything).
   Rewritten `tool_result.content` must be a string or block array — anything else
   fails a `claude --resume` load — so bare JSON is flattened to its compact text.
+  Common → Claude Code removes Claude.ai's `uuid` metadata from tool-result
+  content blocks, including nested search-result and document content. The
+  Messages API rejects those extra fields. Text, supported block fields, and
+  UUIDs inside ordinary tool data are preserved; native load/save is unchanged.
 - **Tool inputs.** The Messages API requires `tool_use.input` to be an object,
   including calls already in the conversation history. Common → Claude Code
   wraps non-object inputs, such as Codex freeform tool text, as
