@@ -1,5 +1,7 @@
 # Cowork
 
+For cloud `cse_…` sessions, use the explicit [Cloud Cowork](cowork-remote.md) source. This harness handles local `local_…` sessions.
+
 Cowork is the Claude desktop app's local agent mode — the surface through
 which people who never open a terminal run Claude on their own files. Under
 the hood it is Claude Code: the app launches the CLI headlessly through the
@@ -23,7 +25,7 @@ its bundled JavaScript.
     │   │       └── <cliSessionId>/subagents/*.jsonl   (not carried)
     │   ├── audit.jsonl           ── Agent SDK stream, HMAC-chained (carried, never written)
     │   ├── .audit-key            ── encrypted chain key (not carried)
-    │   ├── uploads/, outputs/    ── the user's files (not carried)
+    │   ├── uploads/, outputs/    ── the user's files (referenced files carried)
     │   └── .claude/.claude.json, backups/, debug/   (not carried)
     ├── agent/local_ditto_*.json  ── agent-type sessions, same shape, own subdir
     └── cowork_settings.json, rpm/, debug/, …        (app state, skipped)
@@ -119,3 +121,17 @@ same conversation always yields the same files. A session id without the
   `tests/integration/cowork.rs` (fixtures shaped like real sessions).
 
 Last verified: 2026-08-20, against src/harness/cowork.rs and real local sessions.
+
+## Associated files
+
+An explicit local load includes files named in the uploaded-file manifest and
+`Artifact`, `SendUserFile`, or `present_files` calls. Paths must resolve within
+the session's `uploads/` or `outputs/`; missing or ambiguous files fail with a
+filename. Arbitrary working-directory files are not bundled. Limits are 64 MB
+per file and 128 MB per load.
+
+The native export carries file bytes in its `files` map. Saving that native
+export writes a `.txcript-files.json` sidecar so it can be read again without
+the original cache. Common/Simple exports carry inline artifacts. Continuing
+into local Cowork saves those files under the destination session's uploads
+and puts their new paths in the imported history.

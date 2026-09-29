@@ -13,6 +13,8 @@ pub mod claude_chat;
 pub mod claude_code;
 pub mod codex;
 pub mod cowork;
+mod cowork_files;
+pub mod cowork_remote;
 pub mod cursor;
 pub mod cursor_desktop;
 pub mod fx;

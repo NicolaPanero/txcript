@@ -98,7 +98,9 @@ harness = false
 required-features = ["search"]
 
 [features]
-default = ["opencode", "hermes", "claude_chat", "chatgpt", "search"]
+# Explicit cloud Cowork reads reuse the Claude Desktop transport.
+cowork_remote = ["claude_chat"]
+default = ["opencode", "hermes", "claude_chat", "cowork_remote", "chatgpt", "search"]
 # The OpenCode harness store reads OpenCode's SQLite database. The OpenCode
 # codec itself is always available; only the on-disk store needs rusqlite.
 opencode = ["dep:rusqlite"]

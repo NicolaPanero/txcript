@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use txcript::harness::{amp, chatgpt, claude_chat, simple};
+use txcript::harness::{amp, chatgpt, claude_chat, cowork_remote, simple};
 use txcript::{Codec, Common, HarnessId, Store, TextCodec, Transcript, local};
 
 pub mod cache;
@@ -69,7 +69,7 @@ mod pager;
 mod view;
 
 pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, chatgpt, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
-     amp, antigravity, simple, cowork";
+     amp, antigravity, simple, cowork, cowork_remote";
 
 /// The `txcript` binary's command line.
 #[derive(Parser)]
@@ -649,6 +649,54 @@ pub(crate) fn load_direct_chatgpt(source: &str, from: Option<HarnessId>) -> Opti
     })())
 }
 
+/// A full cloud Cowork id bypasses listing, like Claude Chat UUID reads.
+pub(crate) fn load_direct_cowork_remote(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Option<LoadedSession> {
+    if from != Some(HarnessId::CoworkRemote) {
+        return None;
+    }
+    let (id, request) = fragment::parse_ref(source);
+    let normalized = cowork_remote::normalize_id(id);
+    // A mistyped link/id must not turn into an account-wide title search.
+    if normalized.is_err()
+        && !id.contains("://")
+        && !id.starts_with("cse_")
+        && !id.starts_with("session_")
+        && uuid::Uuid::parse_str(id).is_err()
+    {
+        return None;
+    }
+    Some((|| {
+        let id = normalized.map_err(|error| error.to_string())?;
+        let store =
+            cowork_remote::CoworkRemoteStore::from_desktop().map_err(|error| error.to_string())?;
+        let reference = store
+            .session_ref(&id, None)
+            .map_err(|error| error.to_string())?;
+        let native = store.load(&reference).map_err(|error| error.to_string())?;
+        let common =
+            cowork_remote::CoworkRemote::to_common(&native).map_err(|error| error.to_string())?;
+        Ok((common, request))
+    })())
+}
+
+/// Dispatch only an explicitly selected live source with a full provider id.
+pub(crate) fn load_direct_remote(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Option<(HarnessId, LoadedSession)> {
+    let harness = from?;
+    let loaded = match harness {
+        HarnessId::ClaudeChat => load_direct_claude_chat(source, from),
+        HarnessId::ChatGpt => load_direct_chatgpt(source, from),
+        HarnessId::CoworkRemote => load_direct_cowork_remote(source, from),
+        _ => return None,
+    }?;
+    Some((harness, loaded))
+}
+
 /// Positions of the first occurrence of each distinct id starting with
 /// `prefix`. Claude Code writes a session resumed from another cwd under the
 /// same id in a second store; those copies collapse to the first (newest —
@@ -855,6 +903,22 @@ mod filter_tests {
 
 #[cfg(test)]
 mod resolve_tests {
+
+    #[test]
+    fn cowork_urls_require_explicit_source_and_invalid_urls_never_become_searches() {
+        let valid = "https://claude.ai/chat/00000000-0000-8000-8000-000000000002";
+        assert!(super::load_direct_remote(valid, None).is_none());
+        for source in [
+            "https://evil.test/cowork/cse_one",
+            "cse_../bad",
+            "https://claude.ai/chat/00000000-0000-4000-8000-000000000002",
+        ] {
+            assert!(matches!(
+                super::load_direct_remote(source, Some(txcript::HarnessId::CoworkRemote)),
+                Some((txcript::HarnessId::CoworkRemote, Err(_)))
+            ));
+        }
+    }
     use super::distinct_prefix_matches;
 
     #[test]
@@ -1084,6 +1148,13 @@ mod identity_tests {
     }
 
     #[test]
+    fn cowork_remote_is_refused_even_for_an_in_place_continue() {
+        let error =
+            ensure_resumable_source(HarnessId::CoworkRemote, HarnessId::CoworkRemote).unwrap_err();
+        assert!(error.contains("pull-only"));
+    }
+
+    #[test]
     fn claude_chat_is_refused_even_for_an_in_place_continue() {
         let error =
             ensure_resumable_source(HarnessId::ClaudeChat, HarnessId::ClaudeChat).unwrap_err();
@@ -1136,6 +1207,9 @@ fn cmd_list(
             _ => " in that time range".to_string(),
         };
         match from {
+            Some(HarnessId::CoworkRemote) => {
+                println!("no cloud Cowork sessions found{scope}{when}");
+            }
             Some(HarnessId::ClaudeChat) => {
                 println!("no Claude Chat sessions found{scope}{when}");
             }
@@ -1233,23 +1307,23 @@ mod style {
 
     const fn color(h: HarnessId) -> &'static str {
         match h {
-            HarnessId::ClaudeCode => "\x1b[33m",       // yellow
-            HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
-            HarnessId::ChatGpt => "\x1b[38;5;71m",     // OpenAI green
-            HarnessId::Codex => "\x1b[36m",            // cyan
-            HarnessId::OpenCode => "\x1b[32m",         // green
-            HarnessId::Pi => "\x1b[35m",               // magenta
-            HarnessId::Campfire => "\x1b[91m",         // bright red
-            HarnessId::Cursor => "\x1b[34m",           // blue
-            HarnessId::CursorDesktop => "\x1b[96m",    // bright cyan
-            HarnessId::Grok => "\x1b[37m",             // white
-            HarnessId::GrokBot => "\x1b[97m",          // bright white
-            HarnessId::Fx => "\x1b[38;5;39m",          // azure
-            HarnessId::Hermes => "\x1b[93m",           // bright yellow
-            HarnessId::Amp => "\x1b[95m",              // bright magenta
-            HarnessId::Antigravity => "\x1b[94m",      // bright blue
-            HarnessId::Simple => "\x1b[92m",           // bright green
-            HarnessId::Cowork => "\x1b[38;5;208m",     // orange
+            HarnessId::ClaudeCode => "\x1b[33m", // yellow
+            HarnessId::CoworkRemote | HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
+            HarnessId::ChatGpt => "\x1b[38;5;71m", // OpenAI green
+            HarnessId::Codex => "\x1b[36m",      // cyan
+            HarnessId::OpenCode => "\x1b[32m",   // green
+            HarnessId::Pi => "\x1b[35m",         // magenta
+            HarnessId::Campfire => "\x1b[91m",   // bright red
+            HarnessId::Cursor => "\x1b[34m",     // blue
+            HarnessId::CursorDesktop => "\x1b[96m", // bright cyan
+            HarnessId::Grok => "\x1b[37m",       // white
+            HarnessId::GrokBot => "\x1b[97m",    // bright white
+            HarnessId::Fx => "\x1b[38;5;39m",    // azure
+            HarnessId::Hermes => "\x1b[93m",     // bright yellow
+            HarnessId::Amp => "\x1b[95m",        // bright magenta
+            HarnessId::Antigravity => "\x1b[94m", // bright blue
+            HarnessId::Simple => "\x1b[92m",     // bright green
+            HarnessId::Cowork => "\x1b[38;5;208m", // orange
         }
     }
 }
@@ -1270,19 +1344,17 @@ fn cmd_crop(
         ensure_crop_target(target)?;
     }
 
-    if let Some(loaded) = load_direct_claude_chat(source, from) {
-        let target = with.unwrap_or(HarnessId::ClaudeChat);
+    if with.is_none()
+        && let Some(source) = from
+    {
+        ensure_crop_target(source)?;
+    }
+    if let Some((source_harness, loaded)) = load_direct_remote(source, from) {
+        let target = with.unwrap_or(source_harness);
         ensure_crop_target(target)?;
         let (common, request) = loaded?;
-        return crop_loaded(&common, HarnessId::ClaudeChat, target, request.as_ref());
+        return crop_loaded(&common, source_harness, target, request.as_ref());
     }
-    if let Some(loaded) = load_direct_chatgpt(source, from) {
-        let target = with.unwrap_or(HarnessId::ChatGpt);
-        ensure_crop_target(target)?;
-        let (common, request) = loaded?;
-        return crop_loaded(&common, HarnessId::ChatGpt, target, request.as_ref());
-    }
-
     let sessions = discover_with_spinner(from)?;
     let (id, request) = match crop_ref(source) {
         (_, Some(_)) if find_exact(&sessions, from, source).is_some() => (source, None),
@@ -1392,13 +1464,16 @@ fn cmd_continue(
         );
     }
 
-    if let Some(loaded) = load_direct_claude_chat(id, from) {
-        let target = with.unwrap_or(HarnessId::ClaudeChat);
-        ensure_resumable_source(HarnessId::ClaudeChat, target)?;
+    if let Some(source) = from {
+        ensure_resumable_source(source, with.unwrap_or(source))?;
+    }
+    if let Some((source_harness, loaded)) = load_direct_remote(id, from) {
+        let target = with.unwrap_or(source_harness);
+        ensure_resumable_source(source_harness, target)?;
         let (common, request) = loaded?;
         return continue_loaded_remote(
             common,
-            HarnessId::ClaudeChat,
+            source_harness,
             target,
             request.as_ref(),
             out.map(PathBuf::as_path),
@@ -1406,23 +1481,6 @@ fn cmd_continue(
             metadata,
         );
     }
-    if let Some(loaded) = load_direct_chatgpt(id, from) {
-        let target = with.unwrap_or(HarnessId::ChatGpt);
-        ensure_resumable_source(HarnessId::ChatGpt, target)?;
-        let (common, request) = loaded?;
-        return continue_loaded_remote(
-            common,
-            HarnessId::ChatGpt,
-            target,
-            request.as_ref(),
-            out.map(PathBuf::as_path),
-            wants_resume(target, out.is_some(), no_resume),
-            metadata,
-        );
-    }
-
-    // Locate the session by id (exact or unambiguous prefix) or exact title,
-    // optionally scoped to one harness.
     let sessions = discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
@@ -1833,7 +1891,8 @@ fn continue_loaded_remote(
 fn ensure_crop_target(target: HarnessId) -> Result<(), String> {
     if matches!(
         target,
-        HarnessId::ClaudeChat
+        HarnessId::CoworkRemote
+            | HarnessId::ClaudeChat
             | HarnessId::ChatGpt
             | HarnessId::Hermes
             | HarnessId::Amp
@@ -1848,7 +1907,9 @@ fn ensure_crop_target(target: HarnessId) -> Result<(), String> {
 }
 
 fn ensure_resumable_source(source: HarnessId, target: HarnessId) -> Result<(), String> {
-    if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
+    if source == HarnessId::CoworkRemote && target == HarnessId::CoworkRemote {
+        Err("cloud Cowork is pull-only; choose another --with harness".into())
+    } else if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
         Err(
             "Claude Chat is pull-only: choose another --with harness; txcript never continues conversations in Claude"
                 .to_string(),
@@ -2043,7 +2104,10 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
 
 fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
     let spinner = spin::Spinner::start("searching local sessions…");
-    let sessions = if matches!(from, Some(HarnessId::ClaudeChat | HarnessId::ChatGpt)) {
+    let sessions = if matches!(
+        from,
+        Some(HarnessId::ClaudeChat | HarnessId::CoworkRemote | HarnessId::ChatGpt)
+    ) {
         let harness = from.unwrap_or(HarnessId::ClaudeChat);
         spinner.set(format!("reading {harness}…"));
         local::discover_harness(harness).map_err(|error| error.to_string())?

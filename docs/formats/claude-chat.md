@@ -110,7 +110,10 @@ turns. Structured `content` takes precedence over the duplicate message-level
 
 Live tool names are normalized to their Claude Code equivalents where the
 arguments fit: `bash_tool` becomes `Bash`, `view` becomes `Read`, and
-`create_file` becomes `Write`. `present_files` remains a raw tool event, while
+`create_file` becomes `Write` and also contributes a text artifact when its
+input includes the full `file_text`. Older `artifacts` create/rewrite tools
+similarly contribute their complete content; update patches remain tool
+records, since a patch alone is not a complete file. `present_files` remains a raw tool event, while
 each file it presents becomes a first-class Common artifact carrying its
 identity, filename, MIME type, and bytes. When writing Claude Code, the generic
 Common artifact path materializes those bytes under the generated session's

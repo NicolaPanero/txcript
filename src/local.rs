@@ -30,6 +30,8 @@ use crate::harness::{
 use crate::harness::chatgpt;
 #[cfg(feature = "claude_chat")]
 use crate::harness::claude_chat;
+#[cfg(feature = "cowork_remote")]
+use crate::harness::cowork_remote;
 
 #[cfg(feature = "hermes")]
 use crate::harness::hermes;
@@ -54,6 +56,8 @@ pub struct Session {
 }
 
 enum Locator {
+    #[cfg(feature = "cowork_remote")]
+    CoworkRemote(cowork_remote::CoworkRemoteRef),
     Path(PathBuf),
     #[cfg(feature = "claude_chat")]
     ClaudeChatRemote(claude_chat::ClaudeChatRef),
@@ -198,6 +202,22 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
 /// # Errors
 /// When the explicitly selected live backend rejects access or changes shape.
 pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
+    #[cfg(feature = "cowork_remote")]
+    if harness == HarnessId::CoworkRemote {
+        let mut out = Vec::new();
+        discover_cowork_remote_into(&mut out)?;
+        out.sort_by_key(|session| std::cmp::Reverse(session.meta.timestamp));
+        return Ok(out);
+    }
+    #[cfg(not(feature = "cowork_remote"))]
+    if harness == HarnessId::CoworkRemote {
+        return Err(Error::Remote {
+            harness: "cowork_remote",
+            detail:
+                "live cloud Cowork support was not compiled in (enable the `cowork_remote` feature)"
+                    .to_string(),
+        });
+    }
     #[cfg(feature = "claude_chat")]
     if harness == HarnessId::ClaudeChat {
         let mut out = Vec::new();
@@ -238,7 +258,7 @@ pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
 /// The sessions a `--from` selection names: every local harness when
 /// `from` is `None`, else that one harness. This is the only path that
 /// reaches a live web source, and only when it is named explicitly — an omitted
-/// `from` never contacts either one.
+/// `from` never contacts a live source.
 ///
 /// # Errors
 /// When the explicitly selected live backend rejects access or changes shape.
@@ -247,6 +267,20 @@ pub fn discover_scoped(from: Option<HarnessId>) -> Result<Vec<Session>> {
         None => Ok(discover()),
         Some(harness) => discover_harness(harness),
     }
+}
+
+#[cfg(feature = "cowork_remote")]
+fn discover_cowork_remote_into(out: &mut Vec<Session>) -> Result<()> {
+    let store = cowork_remote::CoworkRemoteStore::from_desktop()?;
+    for discovered in Store::discover(&store)? {
+        out.push(Session {
+            harness: HarnessId::CoworkRemote,
+            meta: discovered.meta,
+            updated_at: discovered.reference.updated_at,
+            locator: Locator::CoworkRemote(discovered.reference),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "claude_chat")]
@@ -288,6 +322,10 @@ impl Session {
     pub fn location(&self) -> String {
         match &self.locator {
             Locator::Path(p) => p.display().to_string(),
+            #[cfg(feature = "cowork_remote")]
+            Locator::CoworkRemote(reference) => {
+                format!("https://claude.ai/cowork/{}", reference.session_id)
+            }
             #[cfg(feature = "claude_chat")]
             Locator::ClaudeChatRemote(reference) => {
                 format!("https://claude.ai/chat/{}", reference.conversation_uuid)
@@ -317,6 +355,11 @@ impl Session {
         match (&self.harness, &self.locator) {
             (HarnessId::ClaudeCode, Locator::Path(p)) => {
                 go(claude_code::ClaudeStore::default_root(), p)
+            }
+            #[cfg(feature = "cowork_remote")]
+            (HarnessId::CoworkRemote, Locator::CoworkRemote(reference)) => {
+                let store = cowork_remote::CoworkRemoteStore::from_desktop()?;
+                cowork_remote::CoworkRemote::to_common(&store.load(reference)?)
             }
             #[cfg(feature = "claude_chat")]
             (HarnessId::ClaudeChat, Locator::ClaudeChatRemote(reference)) => {
@@ -374,6 +417,10 @@ impl Session {
         match (&self.harness, &self.locator) {
             (HarnessId::ClaudeCode, Locator::Path(p)) => {
                 go(claude_code::ClaudeStore::default_root(), p)
+            }
+            #[cfg(feature = "cowork_remote")]
+            (HarnessId::CoworkRemote, Locator::CoworkRemote(_)) => {
+                Err(cowork_remote::read_only_error())
             }
             #[cfg(feature = "claude_chat")]
             (HarnessId::ClaudeChat, Locator::ClaudeChatRemote(reference)) => {
@@ -580,6 +627,8 @@ impl Session {
     fn path(&self) -> Option<&PathBuf> {
         match &self.locator {
             Locator::Path(p) => Some(p),
+            #[cfg(feature = "cowork_remote")]
+            Locator::CoworkRemote(_) => None,
             #[cfg(feature = "claude_chat")]
             Locator::ClaudeChatRemote(_) => None,
             #[cfg(feature = "chatgpt")]
@@ -594,6 +643,8 @@ impl Session {
         match &self.locator {
             Locator::ClaudeChatRemote(reference) => Some(reference),
             Locator::Path(_) => None,
+            #[cfg(feature = "cowork_remote")]
+            Locator::CoworkRemote(_) => None,
             #[cfg(feature = "chatgpt")]
             Locator::ChatGptRemote(_) => None,
             #[cfg(any(feature = "opencode", feature = "hermes"))]
@@ -606,6 +657,8 @@ impl Session {
         match &self.locator {
             Locator::ChatGptRemote(reference) => Some(reference),
             Locator::Path(_) => None,
+            #[cfg(feature = "cowork_remote")]
+            Locator::CoworkRemote(_) => None,
             #[cfg(feature = "claude_chat")]
             Locator::ClaudeChatRemote(_) => None,
             #[cfg(any(feature = "opencode", feature = "hermes"))]
@@ -619,6 +672,8 @@ impl Session {
         match &self.locator {
             Locator::Id(id) => Some(id),
             Locator::Path(_) => None,
+            #[cfg(feature = "cowork_remote")]
+            Locator::CoworkRemote(_) => None,
             #[cfg(feature = "claude_chat")]
             Locator::ClaudeChatRemote(_) => None,
             #[cfg(feature = "chatgpt")]
@@ -691,11 +746,13 @@ pub fn write_with(
         S::H: Codec,
         S::Ref: std::fmt::Debug,
     {
-        let store = match root {
-            Some(dir) => make(dir.to_path_buf()),
-            None => make(default_dir(required(store)?)),
-        };
-        let native = <S::H as Codec>::from_common(common)?;
+        let dir = root.map_or_else(
+            || required(store).map(default_dir),
+            |dir| Ok(dir.to_path_buf()),
+        )?;
+        let prepared = materialize_artifacts(common, &dir.join("txcript-artifacts"))?;
+        let store = make(dir);
+        let native = <S::H as Codec>::from_common(&prepared)?;
         let saved = store.save(&native)?;
         Ok(Written {
             id: saved.id,
@@ -709,6 +766,7 @@ pub fn write_with(
         // Live web sources are server-authoritative and have no import. Their
         // additional in-place-resume refusals live in the CLI because that
         // path deliberately bypasses `write` for existing sessions.
+        HarnessId::CoworkRemote => Err(crate::harness::cowork_remote::read_only_error()),
         HarnessId::ClaudeChat => Err(Error::Unconvertible {
             harness: "claude_chat",
             detail: "Claude Chat is a live read-only source; sessions can be pulled out and converted into another harness, but never continued into Claude"
@@ -761,14 +819,17 @@ pub fn write_with(
         HarnessId::GrokBot => {
             if let Some(dir) = root {
                 let store = grok_bot::GrokBotStore::new(dir);
-                let native = grok_bot::GrokBot::from_common(common)?;
+                let prepared = materialize_artifacts(common, &dir.join("txcript-artifacts"))?;
+                let native = grok_bot::GrokBot::from_common(&prepared)?;
                 let saved = store.save(&native)?;
                 Ok(Written {
                     id: saved.id,
                     location: saved.reference.display().to_string(),
                 })
             } else {
-                let saved = grok_bot::mint_with_history(common, opts.metadata)?;
+                let store = required(grok_bot::GrokBotStore::default_root())?;
+                let prepared = materialize_artifacts(common, &store.root.join("txcript-artifacts"))?;
+                let saved = grok_bot::mint_with_history(&prepared, opts.metadata)?;
                 Ok(Written {
                     id: saved.id,
                     location: saved.reference.display().to_string(),
@@ -809,13 +870,18 @@ pub fn write_with(
             common,
             |s| s.root,
         ),
-        HarnessId::Cowork => go(
-            cowork::CoworkStore::default_root(),
-            cowork::CoworkStore::new,
-            root,
-            common,
-            |s| s.root,
-        ),
+        HarnessId::Cowork => {
+            let store = match root { Some(dir) => cowork::CoworkStore::new(dir), None => required(cowork::CoworkStore::default_root())? };
+            // Resolve the active account before writing any files.
+            let account = store.active_account_dir()?;
+            let native = cowork::Cowork::from_common(common)?;
+            let mut common = common.clone();
+            common.meta.id.clone_from(&native.meta.id);
+            let prepared = materialize_artifacts(&common, &account.join(&native.meta.id).join("uploads"))?;
+            let native = cowork::Cowork::from_common(&prepared)?;
+            let saved = store.save(&native)?;
+            Ok(Written { id: saved.id, location: saved.reference.display().to_string() })
+        }
         // Simple is an interchange *input*: documents are handed to txcript
         // directly (a file, stdin, the WASM text API) rather than managed in
         // a directory of its own, so there is nowhere to write one back to.
@@ -860,8 +926,6 @@ fn materialize_artifacts_for_claude_code(
     common: &Transcript<Common>,
     projects_root: &Path,
 ) -> Result<Transcript<Common>> {
-    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
-
     crate::harness::checked_id_component(claude_code::ClaudeCode::NAME, &common.meta.id)?;
     let artifact_root = projects_root
         .join(claude_code::encode_project_dir(
@@ -869,6 +933,17 @@ fn materialize_artifacts_for_claude_code(
         ))
         .join(&common.meta.id)
         .join("artifacts");
+    materialize_artifacts(common, &artifact_root)
+}
+
+fn materialize_artifacts(common: &Transcript<Common>, root: &Path) -> Result<Transcript<Common>> {
+    use std::io::Write;
+    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+    crate::harness::checked_id_component("artifact", &common.meta.id)?;
+    // A fresh directory prevents a repeated continuation from replacing files
+    // used by an earlier session, including when two files share a name.
+    let artifact_root = root.join(format!("{}-{}", common.meta.id, uuid::Uuid::new_v4()));
+    let mut created = false;
     let mut prepared = common.clone();
     for (message_index, message) in prepared.body.iter_mut().enumerate() {
         for (block_index, block) in message.content.iter_mut().enumerate() {
@@ -876,7 +951,20 @@ fn materialize_artifacts_for_claude_code(
                 continue;
             };
             let (bytes, media_type) = match &artifact.source {
-                ArtifactSource::Path { .. } => continue,
+                ArtifactSource::Path { path, media_type } => {
+                    use std::io::Read;
+                    let file = std::fs::File::open(path)?;
+                    if !file.metadata()?.is_file() {
+                        return Err(artifact_error("attachment is not a regular file"));
+                    }
+                    let mut bytes = Vec::new();
+                    file.take((MAX_ARTIFACT_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)?;
+                    if bytes.len() > MAX_ARTIFACT_BYTES {
+                        return Err(artifact_error("artifact exceeds the size limit"));
+                    }
+                    (bytes, media_type.clone())
+                }
                 ArtifactSource::Text { text, media_type } => {
                     if text.len() > MAX_ARTIFACT_BYTES {
                         return Err(artifact_error("artifact exceeds the size limit"));
@@ -900,10 +988,19 @@ fn materialize_artifacts_for_claude_code(
                     (bytes, media_type.clone())
                 }
             };
+            if !created {
+                std::fs::create_dir_all(root)?;
+                std::fs::create_dir(&artifact_root)?;
+                created = true;
+            }
             let directory = artifact_root.join(format!("{message_index}-{block_index}"));
-            std::fs::create_dir_all(&directory)?;
+            std::fs::create_dir(&directory)?;
             let path = directory.join(safe_artifact_name(&artifact.name));
-            std::fs::write(&path, bytes)?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?
+                .write_all(&bytes)?;
             let path = std::path::absolute(&path).unwrap_or(path);
             artifact.source = ArtifactSource::Path {
                 path: path.to_string_lossy().into_owned(),
@@ -948,7 +1045,8 @@ fn write_cursor_desktop(common: &Transcript<Common>, root: Option<&Path>) -> Res
         Some(dir) => cursor_desktop::CursorDesktopStore::new(dir.to_path_buf()),
         None => required(cursor_desktop::CursorDesktopStore::default_root())?,
     };
-    let native = cursor_desktop::CursorDesktop::from_common(common)?;
+    let prepared = materialize_artifacts(common, &store.user_dir.join("txcript-artifacts"))?;
+    let native = cursor_desktop::CursorDesktop::from_common(&prepared)?;
     let saved = store.save(&native)?;
     Ok(Written {
         id: saved.id,
@@ -968,7 +1066,12 @@ fn write_cursor_desktop(_: &Transcript<Common>, _: Option<&Path>) -> Result<Writ
 #[cfg(feature = "opencode")]
 fn write_opencode(common: &Transcript<Common>) -> Result<Written> {
     let store = required(opencode::OpenCodeStore::default_db())?;
-    let native = opencode::OpenCode::from_common(common)?;
+    let parent = store
+        .db_path
+        .parent()
+        .ok_or_else(|| artifact_error("OpenCode database has no parent directory"))?;
+    let prepared = materialize_artifacts(common, &parent.join("txcript-artifacts"))?;
+    let native = opencode::OpenCode::from_common(&prepared)?;
     let saved = store.save(&native)?;
     Ok(Written {
         id: saved.id,
@@ -1002,9 +1105,11 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         match harness {
             HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
             // Source-only harnesses: the CLI refuses before this fallback.
-            HarnessId::ClaudeChat | HarnessId::ChatGpt | HarnessId::Simple => {
-                ("txcript".into(), Vec::new())
-            }
+            HarnessId::ClaudeChat
+            | HarnessId::CoworkRemote
+            | HarnessId::ChatGpt
+            | HarnessId::Simple
+            | HarnessId::GrokBot => ("txcript".into(), Vec::new()),
             HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
             HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
             HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
@@ -1014,9 +1119,6 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             // the session is in the Agents sidebar.
             HarnessId::CursorDesktop => ("cursor".into(), Vec::new()),
             HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
-            // No CLI resume: continue never launches for grok_bot (mint /
-            // openAgent already surfaced the agent in the product UI).
-            HarnessId::GrokBot => ("txcript".into(), Vec::new()),
             HarnessId::Fx => ("fx".into(), vec!["--resume".into(), id]),
             HarnessId::Hermes => ("hermes".into(), vec!["--resume".into(), id]),
             HarnessId::Amp => ("amp".into(), vec!["threads".into(), "continue".into(), id]),
@@ -1070,8 +1172,14 @@ mod live_remote_gate_tests {
         let mut scanned = Vec::new();
         let sessions = discover_with(|harness, _| scanned.push(harness));
         assert!(!scanned.contains(&HarnessId::ClaudeChat));
+        assert!(!scanned.contains(&HarnessId::CoworkRemote));
         assert!(!scanned.contains(&HarnessId::ChatGpt));
         assert!(sessions.iter().all(|s| s.harness != HarnessId::ClaudeChat));
+        assert!(
+            sessions
+                .iter()
+                .all(|s| s.harness != HarnessId::CoworkRemote)
+        );
         assert!(sessions.iter().all(|s| s.harness != HarnessId::ChatGpt));
     }
 
@@ -1079,6 +1187,11 @@ mod live_remote_gate_tests {
     fn an_omitted_from_never_yields_live_web_sessions() {
         let sessions = discover_scoped(None).unwrap_or_else(|e| panic!("{e}"));
         assert!(sessions.iter().all(|s| s.harness != HarnessId::ClaudeChat));
+        assert!(
+            sessions
+                .iter()
+                .all(|s| s.harness != HarnessId::CoworkRemote)
+        );
         assert!(sessions.iter().all(|s| s.harness != HarnessId::ChatGpt));
     }
 
