@@ -367,11 +367,20 @@ fn sqlite_unavailable() -> Error {
 fn db_to_messages(db: &CursorDb, meta: &Meta) -> Result<Vec<Message>> {
     let fallback_ts = meta.timestamp;
     let blobs = active_message_blobs(db)?.unwrap_or_else(|| db.blobs.iter().collect());
-    Ok(blobs.into_iter().fold(Vec::new(), |mut messages, blob| {
+    let mut messages = blobs.into_iter().fold(Vec::new(), |mut messages, blob| {
         // `messages.len()` numbers the message, minting deterministic ids.
         messages.extend(blob_message(blob, meta, fallback_ts, messages.len()));
         messages
-    }))
+    });
+    // Cursor stores one time for a whole chat; targets that sort by time
+    // would reorder its turns, so each message is kept after the previous one.
+    for i in 1..messages.len() {
+        let previous = messages[i - 1].timestamp;
+        if messages[i].timestamp <= previous {
+            messages[i].timestamp = previous + chrono::Duration::milliseconds(1);
+        }
+    }
+    Ok(messages)
 }
 
 // Cursor keeps previous versions of messages in its content-addressed store.
