@@ -14,6 +14,8 @@
 //! (step-start/finish, snapshot, patch, …) are dropped from the conversation
 //! but preserved in the native body.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -287,6 +289,14 @@ fn parse_tool(part: &Value) -> Option<(Block, Option<Block>)> {
         .and_then(|s| s.get("input"))
         .cloned()
         .unwrap_or(Value::Object(Map::new()));
+    // OpenCode requires object-shaped tool inputs. This reserved single-key
+    // wrapper keeps raw Codex custom-tool strings reversible through Common.
+    let raw_input = match raw_input.as_object() {
+        Some(obj) if obj.len() == 1 && obj.contains_key("$txcriptRawInput") => {
+            obj["$txcriptRawInput"].clone()
+        }
+        _ => raw_input,
+    };
     let (name, input) = normalize_tool(tool, raw_input);
     let use_block = Block::ToolUse {
         id: call_id.clone(),
@@ -338,7 +348,32 @@ struct ExportContext<'a> {
     session_id: &'a str,
     cwd: &'a str,
     default_model: Option<&'a str>,
-    messages: &'a [Message],
+    tool_results: HashMap<(usize, &'a str), (&'a ToolOutput, bool)>,
+}
+
+fn pair_tool_results(messages: &[Message]) -> HashMap<(usize, &str), (&ToolOutput, bool)> {
+    let mut pending = HashMap::new();
+    let mut paired = HashMap::new();
+    for (i, message) in messages.iter().enumerate().rev() {
+        for block in message.content.iter().rev() {
+            match block {
+                Block::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    pending.insert(tool_use_id.as_str(), (content, *is_error));
+                }
+                Block::ToolUse { id, .. } => {
+                    if let Some(result) = pending.remove(id.as_str()) {
+                        paired.insert((i, id.as_str()), result);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    paired
 }
 
 fn build_user_record(
@@ -387,7 +422,7 @@ fn build_assistant_record(
     msg: &Message,
     msg_id: &str,
     parent_id: &str,
-    idx: &mut usize,
+    idx: usize,
 ) -> MessageRecord {
     let msg_ms = msg.timestamp.timestamp_millis();
     let mut info = Map::new();
@@ -414,7 +449,7 @@ fn build_assistant_record(
     info.insert("tokens".into(), tokens_value(msg.usage.as_ref()));
 
     let mut parts = vec![json!({
-        "id": format!("prt_{}", det_hex(ctx.session_id, *idx, 0)),
+        "id": format!("prt_{}", det_hex(ctx.session_id, idx, 0)),
         "sessionID": ctx.session_id,
         "messageID": msg_id,
         "type": "step-start",
@@ -424,11 +459,10 @@ fn build_assistant_record(
             block,
             ctx.session_id,
             msg_id,
-            *idx,
+            idx,
             j + 1,
             msg_ms,
-            ctx.messages,
-            idx,
+            &ctx.tool_results,
         );
         parts.push(part);
     }
@@ -445,7 +479,7 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
         session_id: &session_id,
         cwd: meta.cwd.as_deref().unwrap_or_default(),
         default_model: meta.model.as_deref(),
-        messages,
+        tool_results: pair_tool_results(messages),
     };
 
     let mut out: Vec<MessageRecord> = Vec::new();
@@ -465,7 +499,7 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
             }
             Role::Assistant => {
                 let parent_id = last_user_msg_id.as_deref().unwrap_or(&msg_id);
-                let record = build_assistant_record(&ctx, msg, &msg_id, parent_id, &mut idx);
+                let record = build_assistant_record(&ctx, msg, &msg_id, parent_id, idx);
                 out.push(record);
             }
         }
@@ -548,8 +582,7 @@ fn assistant_part(
     i: usize,
     j: usize,
     ms: i64,
-    messages: &[Message],
-    idx: &mut usize,
+    tool_results: &HashMap<(usize, &str), (&ToolOutput, bool)>,
 ) -> Value {
     let time = json!({ "start": ms, "end": ms });
     let mut p = match block {
@@ -567,6 +600,11 @@ fn assistant_part(
         Block::ToolUse { id, tool } => {
             let (name, input) = tool.to_canonical();
             let (oc_name, oc_input) = denormalize_tool(&name, input);
+            let oc_input = if oc_input.is_object() {
+                oc_input
+            } else {
+                json!({"$txcriptRawInput": oc_input})
+            };
             let mut state = json!({
                 "status": "completed",
                 "input": oc_input,
@@ -575,26 +613,18 @@ fn assistant_part(
                 "metadata": {},
                 "time": time,
             });
-            // Fold matching ToolResult from the following user turn into state.output.
-            if let Some(next) = messages.get(*idx + 1)
-                && matches!(next.role, Role::User)
-                && let Some(result) = next.content.iter().find_map(|b| match b {
-                    Block::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } if tool_use_id == id => Some((content, *is_error)),
-                    _ => None,
-                })
-                && let Value::Object(obj) = &mut state
-            {
-                if result.1 {
-                    obj.insert("status".into(), json!("error"));
-                    obj.insert("error".into(), json!(output_to_string(result.0)));
-                    obj.remove("output");
+            if let Some((content, is_error)) = tool_results.get(&(i, id.as_str())) {
+                if *is_error {
+                    state["status"] = json!("error");
+                    state["error"] = json!(output_to_string(content));
+                    if let Some(object) = state.as_object_mut() {
+                        object.remove("output");
+                    }
                 } else {
-                    obj.insert("output".into(), json!(output_to_string(result.0)));
+                    state["output"] = json!(output_to_string(content));
                 }
+            } else {
+                state["status"] = json!("pending");
             }
             json!({ "type": "tool", "tool": oc_name, "callID": id, "state": state })
         }

@@ -8,6 +8,8 @@
 
 mod claude_tool_result;
 mod codex_pairing;
+mod codex_structured_output;
+mod opencode_raw_input;
 
 use chrono::{DateTime, Utc};
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};

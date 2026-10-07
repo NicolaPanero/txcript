@@ -60,7 +60,7 @@ impl Codec for Cursor {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         Ok(Transcript::new(
             transcript.meta.clone(),
-            db_to_messages(&transcript.body, &transcript.meta),
+            db_to_messages(&transcript.body, &transcript.meta)?,
         ))
     }
 
@@ -364,13 +364,88 @@ fn sqlite_unavailable() -> Error {
 
 // -- db <-> common -------------------------------------------------------
 
-fn db_to_messages(db: &CursorDb, meta: &Meta) -> Vec<Message> {
+fn db_to_messages(db: &CursorDb, meta: &Meta) -> Result<Vec<Message>> {
     let fallback_ts = meta.timestamp;
-    db.blobs.iter().fold(Vec::new(), |mut messages, blob| {
+    let blobs = active_message_blobs(db)?.unwrap_or_else(|| db.blobs.iter().collect());
+    Ok(blobs.into_iter().fold(Vec::new(), |mut messages, blob| {
         // `messages.len()` numbers the message, minting deterministic ids.
         messages.extend(blob_message(blob, meta, fallback_ts, messages.len()));
         messages
-    })
+    }))
+}
+
+// Cursor keeps previous versions of messages in its content-addressed store.
+// Only field 1 of the current root identifies the active model transcript.
+fn active_message_blobs(db: &CursorDb) -> Result<Option<Vec<&CursorBlob>>> {
+    let Some(root_id) = cursor_meta_value(db)
+        .and_then(|v| {
+            v.get("latestRootBlobId")
+                .and_then(Value::as_str)
+                .map(String::from)
+        })
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let by_id: HashMap<_, _> = db
+        .blobs
+        .iter()
+        .map(|blob| (blob.id.as_str(), blob))
+        .collect();
+    let malformed = || Error::Malformed {
+        harness: Cursor::NAME,
+        detail: "invalid active transcript references".into(),
+    };
+    let root = by_id.get(root_id.as_str()).ok_or_else(malformed)?;
+    let mut input = root.data.as_slice();
+    let mut messages = Vec::new();
+    while !input.is_empty() {
+        let tag = read_proto_varint(&mut input).ok_or_else(malformed)?;
+        let field = tag >> 3;
+        match tag & 7 {
+            0 => {
+                read_proto_varint(&mut input).ok_or_else(malformed)?;
+            }
+            1 | 5 => {
+                let size = if tag & 7 == 1 { 8 } else { 4 };
+                input = input.get(size..).ok_or_else(malformed)?;
+            }
+            2 => {
+                let size = usize::try_from(read_proto_varint(&mut input).ok_or_else(malformed)?)
+                    .map_err(|_| malformed())?;
+                let bytes = input.get(..size).ok_or_else(malformed)?;
+                if field == 1 {
+                    if bytes.len() != 32 {
+                        return Err(malformed());
+                    }
+                    messages.push(
+                        *by_id
+                            .get(hex_encode(bytes).as_str())
+                            .ok_or_else(malformed)?,
+                    );
+                }
+                input = input.get(size..).ok_or_else(malformed)?;
+            }
+            _ => return Err(malformed()),
+        }
+    }
+    Ok(Some(messages))
+}
+
+fn read_proto_varint(input: &mut &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..70).step_by(7) {
+        let (&byte, rest) = input.split_first()?;
+        *input = rest;
+        if shift == 63 && byte > 1 {
+            return None;
+        }
+        value |= u64::from(byte & 127) << shift;
+        if byte < 128 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// The conversational turn one blob carries, if any.
@@ -521,7 +596,7 @@ struct CursorStateToolResult {
 fn cursor_state_blobs(
     meta: &Meta,
     messages: &[Message],
-    _message_ids: &[String],
+    message_ids: &[String],
 ) -> Vec<CursorBlob> {
     let turns = cursor_state_turns(meta, messages);
     let mut blobs = Vec::new();
@@ -552,7 +627,11 @@ fn cursor_state_blobs(
         blobs.push(turn_blob);
     }
 
-    blobs.push(cursor_blob(cursor_root_state_proto(meta, &turn_ids)));
+    blobs.push(cursor_blob(cursor_root_state_proto(
+        meta,
+        &turn_ids,
+        message_ids,
+    )));
     blobs
 }
 
@@ -1184,8 +1263,15 @@ fn cursor_turn_structure_proto(user_id: &[u8; 32], step_ids: &[[u8; 32]]) -> Vec
     turn
 }
 
-fn cursor_root_state_proto(meta: &Meta, turn_ids: &[[u8; 32]]) -> Vec<u8> {
+fn cursor_root_state_proto(meta: &Meta, turn_ids: &[[u8; 32]], message_ids: &[String]) -> Vec<u8> {
     let mut root = Vec::new();
+    // Field 1 is the model-protocol transcript. Field 8 alone restores the UI
+    // turn graph but gives the resumed model no imported conversation.
+    for id in message_ids {
+        if let Ok(bytes) = hex_decode(id) {
+            pb_len(&mut root, 1, &bytes);
+        }
+    }
     for turn_id in turn_ids {
         pb_len(&mut root, 8, turn_id);
     }
@@ -1195,6 +1281,9 @@ fn cursor_root_state_proto(meta: &Meta, turn_ids: &[[u8; 32]]) -> Vec<u8> {
         && ms > 0
     {
         pb_varint_field(&mut root, 26, ms);
+        // Cursor requires a timezone whenever the conversation start time is set.
+        // Canonical timestamps are UTC; source CLI timezone is not portable.
+        pb_string(&mut root, 27, "UTC");
     }
     root
 }
@@ -1466,7 +1555,14 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
         .as_ref()
         .and_then(|v| v.get("workspacePath"))
         .and_then(Value::as_str)
-        .map(String::from);
+        .map(String::from)
+        .or_else(|| {
+            session_meta
+                .and_then(|v| v.get("cwd"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        });
     let mut model = db_meta
         .as_ref()
         .and_then(|v| v.get("lastUsedModel"))
@@ -1567,8 +1663,7 @@ fn ensure_cursor_meta(body: &mut CursorDb, meta: &Meta, id: &str) {
         "name": title,
         "createdAt": created_at,
         "mode": "default",
-        "isRunEverything": true,
-        "approvalMode": "unrestricted",
+        "isRunEverything": false,
         "lastUsedModel": model,
     });
     if let Some(cwd) = meta.cwd.as_ref() {
@@ -1608,7 +1703,7 @@ fn write_session_files(session_dir: &Path, body: &CursorDb, meta: &Meta, _id: &s
         serde_json::to_string(&session_meta)?,
     )?;
 
-    let prompts = db_to_messages(body, meta)
+    let prompts = db_to_messages(body, meta)?
         .into_iter()
         .filter(|message| message.role == Role::User)
         .flat_map(|message| message.content)
@@ -1776,7 +1871,16 @@ fn text_blocks_from_str(s: &str, strip_query: bool) -> Vec<Block> {
 }
 
 fn strip_user_query(text: &str) -> String {
-    let trimmed = text.trim();
+    let mut trimmed = text.trim();
+    // Cursor CLI prefixes the query with the time it was sent.
+    if let Some(after) = trimmed
+        .strip_prefix("<timestamp>")
+        .and_then(|rest| rest.split_once("</timestamp>"))
+        .map(|(_, after)| after.trim_start())
+        .filter(|after| after.starts_with("<user_query>"))
+    {
+        trimmed = after;
+    }
     if let Some(inner) = trimmed
         .strip_prefix("<user_query>")
         .and_then(|s| s.strip_suffix("</user_query>"))
@@ -2139,6 +2243,77 @@ mod serde_hex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_the_cli_timestamp_before_a_user_query() {
+        assert_eq!(
+            strip_user_query(
+                "<timestamp>Monday, Oct 5, 2026, 11:25 AM (UTC+2)</timestamp>\n<user_query>\nhello\n</user_query>"
+            ),
+            "hello"
+        );
+        assert_eq!(
+            strip_user_query("<timestamp>kept</timestamp> plain text"),
+            "<timestamp>kept</timestamp> plain text"
+        );
+    }
+
+    #[test]
+    fn resumed_session_retains_cwd_from_native_sidecar() {
+        let mut db = CursorDb {
+            blobs: Vec::new(),
+            meta: vec![CursorMetaEntry {
+                key: "0".into(),
+                value: json!({"latestRootBlobId":"rewritten"}).to_string(),
+            }],
+            session_meta: Some(json!({"cwd":"/workspace/original"})),
+        };
+        assert_eq!(
+            meta_from_db(&db, None).cwd.as_deref(),
+            Some("/workspace/original")
+        );
+        db.meta[0].value = json!({"workspacePath":"/workspace/current"}).to_string();
+        assert_eq!(
+            meta_from_db(&db, None).cwd.as_deref(),
+            Some("/workspace/current")
+        );
+        db.meta.clear();
+        db.session_meta = Some(json!({"cwd":""}));
+        assert!(meta_from_db(&db, None).cwd.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn active_root_excludes_stale_messages_and_preserves_reference_order() {
+        let old = cursor_blob(br#"{"role":"user","content":"obsolete"}"#.to_vec());
+        let first = cursor_blob(br#"{"role":"user","content":"first"}"#.to_vec());
+        let second = cursor_blob(
+            br#"{"role":"assistant","content":[{"type":"text","text":"second"}]}"#.to_vec(),
+        );
+        let mut root_data = Vec::new();
+        for blob in [&first, &second] {
+            pb_len(&mut root_data, 1, &hex_decode(&blob.id).unwrap());
+        }
+        let root = cursor_blob(root_data);
+        let db = CursorDb {
+            blobs: vec![old, second, first, root.clone()],
+            meta: vec![CursorMetaEntry {
+                key: "0".into(),
+                value: json!({"latestRootBlobId":root.id}).to_string(),
+            }],
+            session_meta: None,
+        };
+        let selected = active_message_blobs(&db).unwrap().unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(String::from_utf8_lossy(&selected[0].data).contains("first"));
+        assert!(String::from_utf8_lossy(&selected[1].data).contains("second"));
+        let mut broken = db.clone();
+        broken.blobs.remove(1);
+        assert!(active_message_blobs(&broken).is_err());
+        let mut truncated = db;
+        truncated.blobs.last_mut().unwrap().data = vec![10, 255];
+        assert!(active_message_blobs(&truncated).is_err());
+    }
 
     #[test]
     fn hashes_match_cursor_paths_and_blob_ids() {
