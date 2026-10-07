@@ -327,12 +327,7 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                             .and_then(Value::as_str)
                             .map(String::from)
                         {
-                            let content = payload
-                                .get("output")
-                                .and_then(Value::as_str)
-                                .map_or(ToolOutput::Text(String::new()), |s| {
-                                    ToolOutput::Text(s.to_string())
-                                });
+                            let content = parse_tool_output_value(payload.get("output"));
                             queued.push(tool_result(
                                 ts,
                                 result_key(&call_id),
@@ -378,11 +373,10 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                             .and_then(Value::as_str)
                             .map(String::from)
                         {
-                            let raw = payload
-                                .get("output")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default();
-                            let (content, is_error) = parse_custom_tool_output(raw);
+                            let (content, is_error) = match payload.get("output") {
+                                Some(Value::String(raw)) => parse_custom_tool_output(raw),
+                                other => (parse_tool_output_value(other), false),
+                            };
                             canonical_results.insert(result_key(&call_id));
                             queued.push(tool_result(
                                 ts,
@@ -1539,6 +1533,14 @@ fn format_exec_output(payload: &Value) -> String {
             (true, false) => stderr.to_string(),
             (true, true) => String::new(),
         }
+    }
+}
+
+fn parse_tool_output_value(output: Option<&Value>) -> ToolOutput {
+    match output {
+        Some(Value::String(text)) => ToolOutput::Text(text.clone()),
+        Some(value) => ToolOutput::Json(value.clone()),
+        None => ToolOutput::Text(String::new()),
     }
 }
 

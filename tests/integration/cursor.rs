@@ -194,10 +194,27 @@ fn text_codec_round_trips_native_export() {
 fn from_common_writes_cursor_resume_state_turns() {
     let native = cursor::Cursor::from_common(&sample_common()).unwrap();
     let root = latest_root_blob(&native.body);
+    assert!(!len_fields(&root.data, 1).is_empty());
     let turn_refs = len_fields(&root.data, 8);
 
     assert_eq!(turn_refs.len(), 1);
-    assert!(len_fields(&root.data, 1).is_empty());
+    let message_refs = len_fields(&root.data, 1);
+    assert!(!message_refs.is_empty());
+    for reference in &message_refs {
+        let id = hex_encode_test(reference);
+        let blob = native
+            .body
+            .blobs
+            .iter()
+            .find(|blob| blob.id == id)
+            .expect("referenced message exists");
+        let value: serde_json::Value =
+            serde_json::from_slice(&blob.data).expect("referenced message is JSON");
+        assert!(
+            value.get("role").is_some(),
+            "root references conversational messages"
+        );
+    }
 
     let turn_id = hex_encode_test(&turn_refs[0]);
     let turn_blob = native
@@ -545,6 +562,16 @@ fn cursor_meta_json(body: &cursor::CursorDb) -> serde_json::Value {
         .as_str();
     let decoded = hex_decode_test(raw);
     serde_json::from_slice(&decoded).expect("cursor meta json")
+}
+
+#[test]
+fn imported_cursor_conversation_has_a_timezone_and_keeps_permission_checks() {
+    let native = cursor::Cursor::from_common(&sample_common()).unwrap();
+    let root = latest_root_blob(&native.body);
+    assert_eq!(string_fields(&root.data, 27), vec!["UTC"]);
+    let meta = cursor_meta_json(&native.body);
+    assert_eq!(meta["isRunEverything"], false);
+    assert!(meta.get("approvalMode").is_none());
 }
 
 fn first_tool_call(body: &cursor::CursorDb) -> Option<Vec<u8>> {
