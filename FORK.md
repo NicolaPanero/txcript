@@ -8,10 +8,13 @@ conversations between agents natively:
 
 - Cursor: sessions written for Cursor carry the conversation's time zone
   (without it Cursor's agent rejects the chat), only the active transcript is
-  read, and the `<timestamp>` prefix of CLI queries is dropped.
+  read, the `<timestamp>` prefix of CLI queries is dropped, and messages read
+  from Cursor keep their order (Cursor stores one time for a whole chat).
 - Codex: structured tool outputs are kept.
 - OpenCode: tool results stay paired with their calls.
 - `examples/superset-transfer.rs`: Superset's conversion helper.
 
-Tags are named `v<txcript version>-fork.<n>`. The fixes are the same as
-Superset's `tools/txcript-transfer/native-transfer.patch`.
+Tags are named `v<txcript version>-fork.<n>`, and the CLI reports that
+version. `v0.14.4-fork.3` is Superset's
+`tools/txcript-transfer/native-transfer.patch`; `fork.4` adds the message
+order for Cursor to the library, so the CLI's exports get it too.
