@@ -134,6 +134,10 @@ pub enum SessionCommand {
         /// YYYY-MM-DD, a bare date meaning the end of that local day)
         #[arg(long, value_name = "WHEN", value_parser = parse_until)]
         until: Option<chrono::DateTime<chrono::Utc>>,
+        /// Print the sessions as a JSON array (harness, id, timestamp,
+        /// title, cwd, git_branch, model) for other programs to read
+        #[arg(long)]
+        json: bool,
     },
     /// Continue a session, then launch its harness
     ///
@@ -390,8 +394,9 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             limit,
             since,
             until,
+            json,
         } => {
-            cmd_list(from, cwd.as_deref(), limit, since, until)?;
+            cmd_list(from, cwd.as_deref(), limit, since, until, json)?;
             Ok(ExitCode::SUCCESS)
         }
         SessionCommand::Continue {
@@ -1189,6 +1194,7 @@ fn cmd_list(
     limit: Option<usize>,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
+    json: bool,
 ) -> Result<(), String> {
     let sessions = discover_with_spinner(from)?;
     let listed: Vec<_> = sessions
@@ -1200,6 +1206,25 @@ fn cmd_list(
         })
         .take(limit.unwrap_or(usize::MAX))
         .collect();
+    if json {
+        let rows: Vec<_> = listed
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "harness": s.harness.to_string(),
+                    "id": s.meta.id,
+                    "timestamp": s.meta.timestamp.to_rfc3339(),
+                    "title": s.meta.title,
+                    "cwd": s.meta.cwd,
+                    "git_branch": s.meta.git_branch,
+                    "model": s.meta.model,
+                })
+            })
+            .collect();
+        let text = serde_json::to_string(&rows).map_err(|error| error.to_string())?;
+        println!("{text}");
+        return Ok(());
+    }
     if listed.is_empty() {
         let scope = cwd.map_or(String::new(), |d| format!(" for {}", d.display()));
         let when = match (since, until) {
