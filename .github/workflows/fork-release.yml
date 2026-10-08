@@ -1,0 +1,97 @@
+name: Fork release
+
+# Publishes this fork's build for NicolaPanero/zed and NicolaPanero/superset
+# when a `v<version>-fork.<N>` tag is pushed (scripts/set-fork-version.sh sets
+# the versions it checks): the `txcript` CLI that Zed Fork bundles and the
+# `superset-transfer` helper Superset bundles, for Apple Silicon Macs. Then,
+# with a DISPATCH_TOKEN secret, it starts both apps' release builds, which
+# pick up the newest release; without it they find it at their daily check.
+#
+# Upstream's publishing workflows (crates.io, npm) are removed on this branch.
+
+on:
+  push:
+    tags: ["v*-fork.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, e.g. v0.14.4-fork.5
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    if: github.repository == 'NicolaPanero/txcript'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Versions match the tag
+        run: |
+          version="${TAG#v}"
+          cli=$(sed -n '3s/^version = "\(.*\)"$/\1/p' cli/Cargo.toml)
+          engine=$(sed -n 's/^const ENGINE: &str = "\(.*\)";$/\1/p' examples/superset-transfer.rs)
+          echo "tag $version, cli $cli, helper $engine"
+          if [ "$cli" != "$version" ] || [ "$engine" != "$version" ]; then
+            echo "::error::Run scripts/set-fork-version.sh for $TAG before tagging"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --locked -p txcript --no-default-features --features opencode
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p txcript-cli
+          cargo build --release --locked -p txcript --example superset-transfer \
+            --no-default-features --features opencode
+          target/release/txcript --version | grep -qx "txcript ${TAG#v}"
+          target/release/examples/superset-transfer capabilities
+          mkdir -p dist/txcript dist/helper
+          cp target/release/txcript LICENSE dist/txcript/
+          cp target/release/examples/superset-transfer LICENSE dist/helper/
+          tar -czf txcript-aarch64-apple-darwin.tar.gz -C dist/txcript txcript LICENSE
+          tar -czf superset-transfer-aarch64-apple-darwin.tar.gz -C dist/helper superset-transfer LICENSE
+          shasum -a 256 txcript-aarch64-apple-darwin.tar.gz superset-transfer-aarch64-apple-darwin.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release create "$TAG" \
+            txcript-aarch64-apple-darwin.tar.gz \
+            superset-transfer-aarch64-apple-darwin.tar.gz \
+            SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "txcript ${TAG#v}" \
+            --notes "Official txcript plus this fork's fixes (see FORK.md), built for Apple Silicon Macs." \
+            --latest
+
+      - name: Start the apps' builds
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "No DISPATCH_TOKEN: Zed and Superset pick this release up at their daily check."
+            exit 0
+          fi
+          gh workflow run fork_release.yml --repo NicolaPanero/zed --ref main
+          gh workflow run fork-release.yml --repo NicolaPanero/superset --ref fork/main
