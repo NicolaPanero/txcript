@@ -134,10 +134,19 @@ pub enum SessionCommand {
         /// YYYY-MM-DD, a bare date meaning the end of that local day)
         #[arg(long, value_name = "WHEN", value_parser = parse_until)]
         until: Option<chrono::DateTime<chrono::Utc>>,
-        /// Print the sessions as a JSON array (harness, id, timestamp,
-        /// title, cwd, git_branch, model) for other programs to read
+        /// Print the sessions as a JSON array (`harness`, `id`, `timestamp`,
+        /// `updated_at`, `title`, `cwd`, `git_branch`, `model`) for other programs to
+        /// read
         #[arg(long)]
         json: bool,
+        /// With --json, only sessions in or under any of these directories
+        /// (repeatable)
+        #[arg(long, value_name = "DIR", requires = "json")]
+        under: Vec<PathBuf>,
+        /// With --json, add each session's first prompt as `preview` (reads
+        /// every listed session, so combine it with filters)
+        #[arg(long, requires = "json")]
+        preview: bool,
     },
     /// Continue a session, then launch its harness
     ///
@@ -395,8 +404,14 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             since,
             until,
             json,
+            under,
+            preview,
         } => {
-            cmd_list(from, cwd.as_deref(), limit, since, until, json)?;
+            if json {
+                cmd_list_json(from, cwd.as_deref(), &under, limit, since, until, preview)?;
+            } else {
+                cmd_list(from, cwd.as_deref(), limit, since, until)?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         SessionCommand::Continue {
@@ -1188,13 +1203,75 @@ mod identity_tests {
     }
 }
 
+/// `txcript list --json`: the listed sessions as one JSON array, for other
+/// programs (Zed Fork's "Find chat", Superset) to read.
+fn cmd_list_json(
+    from: Option<HarnessId>,
+    cwd: Option<&std::path::Path>,
+    under: &[PathBuf],
+    limit: Option<usize>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    preview: bool,
+) -> Result<(), String> {
+    let sessions = discover_with_spinner(from)?;
+    let rows: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            selected(s, from, cwd)
+                && (under.is_empty() || under.iter().any(|dir| selected(s, from, Some(dir))))
+                && since.is_none_or(|t| s.meta.timestamp >= t)
+                && until.is_none_or(|t| s.meta.timestamp <= t)
+        })
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|s| {
+            let mut row = serde_json::json!({
+                "harness": s.harness.to_string(),
+                "id": s.meta.id,
+                "timestamp": s.meta.timestamp.to_rfc3339(),
+                "updated_at": s.updated_at.map(|t| t.to_rfc3339()),
+                "title": s.meta.title,
+                "cwd": s.meta.cwd,
+                "git_branch": s.meta.git_branch,
+                "model": s.meta.model,
+            });
+            if preview {
+                row["preview"] = s.read().ok().and_then(|t| first_prompt(&t)).into();
+            }
+            row
+        })
+        .collect();
+    let text = serde_json::to_string(&rows).map_err(|error| error.to_string())?;
+    println!("{text}");
+    Ok(())
+}
+
+/// The first user prompt of a transcript, on one line and at most 200
+/// characters, past the context harnesses inject before it.
+fn first_prompt(transcript: &Transcript<Common>) -> Option<String> {
+    transcript
+        .body
+        .iter()
+        .filter(|message| message.role == txcript::common::Role::User)
+        .find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                txcript::common::Block::Text { text } => {
+                    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    // Context the harness injects before the first prompt.
+                    let injected = line.starts_with('<') || line.starts_with("# AGENTS.md");
+                    (!line.is_empty() && !injected).then(|| line.chars().take(200).collect())
+                }
+                _ => None,
+            })
+        })
+}
+
 fn cmd_list(
     from: Option<HarnessId>,
     cwd: Option<&std::path::Path>,
     limit: Option<usize>,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
-    json: bool,
 ) -> Result<(), String> {
     let sessions = discover_with_spinner(from)?;
     let listed: Vec<_> = sessions
@@ -1206,25 +1283,6 @@ fn cmd_list(
         })
         .take(limit.unwrap_or(usize::MAX))
         .collect();
-    if json {
-        let rows: Vec<_> = listed
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "harness": s.harness.to_string(),
-                    "id": s.meta.id,
-                    "timestamp": s.meta.timestamp.to_rfc3339(),
-                    "title": s.meta.title,
-                    "cwd": s.meta.cwd,
-                    "git_branch": s.meta.git_branch,
-                    "model": s.meta.model,
-                })
-            })
-            .collect();
-        let text = serde_json::to_string(&rows).map_err(|error| error.to_string())?;
-        println!("{text}");
-        return Ok(());
-    }
     if listed.is_empty() {
         let scope = cwd.map_or(String::new(), |d| format!(" for {}", d.display()));
         let when = match (since, until) {

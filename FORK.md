@@ -13,14 +13,18 @@ conversations between agents natively:
 - Codex: structured tool outputs are kept, and the AGENTS.md instructions
   Codex records as a user message are not read as a prompt.
 - OpenCode: tool results stay paired with their calls.
-- `txcript list --json`: the session list as JSON, for Zed Fork's "Find chat…".
+- `txcript list --json`: the session list as JSON (with `updated_at`), for
+  Zed Fork's "Find chat…" and Superset's "Import chat"; `--under DIR`
+  (repeatable) filters by folders and `--preview` adds each session's first
+  prompt.
 - `examples/superset-transfer.rs`: Superset's conversion helper.
 
 Tags are named `v<txcript version>-fork.<n>`, and the CLI reports that
 version. `v0.14.4-fork.3` is Superset's
 `tools/txcript-transfer/native-transfer.patch`; `fork.4` adds the message
 order for Cursor to the library, so the CLI's exports get it too; `fork.5`
-skips Codex's AGENTS.md prelude; `fork.6` publishes releases automatically; `fork.7` adds `list --json`.
+skips Codex's AGENTS.md prelude; `fork.6` publishes releases automatically; `fork.7` adds `list --json`; `fork.8` adds `--under`, `--preview` and
+`updated_at` to it.
 
 ## Releasing
 

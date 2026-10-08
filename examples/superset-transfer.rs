@@ -11,7 +11,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.7";
+const ENGINE: &str = "0.14.4-fork.8";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 const ADAPTERS: [&str; 5] = ["claude_code", "codex", "cursor", "grok", "opencode"];
 
