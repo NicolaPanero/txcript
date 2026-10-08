@@ -1,6 +1,6 @@
 [package]
 name = "txcript-cli"
-version = "0.14.4-fork.4"
+version = "0.14.4-fork.5"
 edition = "2024"
 rust-version = "1.96"
 description = "CLI for listing, searching, and continuing txcript sessions."

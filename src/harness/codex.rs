@@ -1483,6 +1483,8 @@ fn is_setup_message(content: &Value) -> bool {
 fn is_setup_text(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with("<environment_context>")
+        || t.starts_with("# AGENTS.md instructions for ")
+        || t.starts_with("<user_instructions>")
         || t.starts_with("<permissions instructions>")
         || t.starts_with("<collaboration_mode>")
         || t.starts_with("<sandbox_mode>")
@@ -1634,6 +1636,37 @@ fn file_fingerprint(path: &Path) -> String {
 
 fn home() -> Option<PathBuf> {
     super::home_dir()
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::is_setup_message;
+    use serde_json::json;
+
+    /// Codex records the project's AGENTS.md and the environment as one
+    /// user message before the first prompt.
+    #[test]
+    fn agents_md_and_environment_prelude_is_setup() {
+        let content = json!([
+            {"type": "input_text", "text": "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>"},
+            {"type": "input_text", "text": "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"},
+        ]);
+        assert!(is_setup_message(&content));
+    }
+
+    #[test]
+    fn older_user_instructions_prelude_is_setup() {
+        let content = json!([
+            {"type": "input_text", "text": "<user_instructions>\nRules\n</user_instructions>"},
+        ]);
+        assert!(is_setup_message(&content));
+    }
+
+    #[test]
+    fn a_prompt_is_not_setup() {
+        let content = json!([{"type": "input_text", "text": "Read the AGENTS.md instructions for this repo"}]);
+        assert!(!is_setup_message(&content));
+    }
 }
 
 #[cfg(test)]
