@@ -1,11 +1,11 @@
 name: Fork release
 
-# Publishes this fork's build for NicolaPanero/zed and NicolaPanero/superset
+# Publishes this fork's build for NicolaPanero/superset
 # when a `v<version>-fork.<N>` tag is pushed (scripts/set-fork-version.sh sets
-# the versions it checks): the `txcript` CLI that Zed Fork bundles and the
+# the versions it checks): the `txcript` CLI and the
 # `superset-transfer` helper Superset bundles, for Apple Silicon Macs. Then,
-# with a DISPATCH_TOKEN secret, it starts both apps' release builds, which
-# pick up the newest release; without it they find it at their daily check.
+# with a DISPATCH_TOKEN secret, it starts Superset's release build, which
+# picks up the newest release; without it Superset finds it at its daily check.
 #
 # Upstream's publishing workflows (crates.io, npm) are removed on this branch.
 
@@ -85,13 +85,12 @@ jobs:
             --notes "Official txcript plus this fork's fixes (see FORK.md), built for Apple Silicon Macs." \
             --latest
 
-      - name: Start the apps' builds
+      - name: Start the Superset build
         env:
           GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "No DISPATCH_TOKEN: Zed and Superset pick this release up at their daily check."
+            echo "No DISPATCH_TOKEN: Superset picks this release up at its daily check."
             exit 0
           fi
-          gh workflow run fork_release.yml --repo NicolaPanero/zed --ref main
           gh workflow run fork-release.yml --repo NicolaPanero/superset --ref fork/main
