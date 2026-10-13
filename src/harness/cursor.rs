@@ -1774,7 +1774,10 @@ fn workspace_from_message(obj: &Value) -> Option<String> {
 }
 
 fn is_context_injection(obj: &Value) -> bool {
-    content_strings(obj.get("content")).any(|s| s.contains("<user_info>"))
+    content_strings(obj.get("content")).any(|s| {
+        let text = s.trim();
+        text.starts_with("<user_info>") && text.ends_with("</user_info>")
+    })
 }
 
 fn content_strings(content: Option<&Value>) -> impl Iterator<Item = &str> {

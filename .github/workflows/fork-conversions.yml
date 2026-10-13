@@ -1,0 +1,25 @@
+name: Fork conversion tests
+
+on:
+  push:
+    branches: [fork]
+  pull_request:
+    branches: [fork]
+
+permissions:
+  contents: read
+
+jobs:
+  conversions:
+    if: github.repository == 'NicolaPanero/txcript'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked -p txcript --no-default-features --features opencode --all-targets -- -D warnings
+      - run: cargo test --locked -p txcript --no-default-features --features opencode
+      - run: cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode

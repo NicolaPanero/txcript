@@ -5,7 +5,7 @@ name: Fork release
 # the versions it checks): the `txcript` CLI and the
 # `superset-transfer` helper Superset bundles, for Apple Silicon Macs. Then,
 # with a DISPATCH_TOKEN secret, it starts Superset's release build, which
-# picks up the newest release; without it Superset finds it at its daily check.
+# uses its explicitly pinned version in scripts/fork/txcript-version.json.
 #
 # Upstream's publishing workflows (crates.io, npm) are removed on this branch.
 
@@ -55,6 +55,9 @@ jobs:
       - name: Test
         run: cargo test --locked -p txcript --no-default-features --features opencode
 
+      - name: Test the conversion helper
+        run: cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode
+
       - name: Build
         run: |
           cargo build --release --locked -p txcript-cli
@@ -90,7 +93,7 @@ jobs:
           GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "No DISPATCH_TOKEN: Superset picks this release up at its daily check."
+            echo "No DISPATCH_TOKEN: update the Superset txcript pin after this release succeeds."
             exit 0
           fi
           gh workflow run fork-release.yml --repo NicolaPanero/superset --ref fork/main

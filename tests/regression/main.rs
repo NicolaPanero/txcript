@@ -9,6 +9,7 @@
 mod claude_tool_result;
 mod codex_pairing;
 mod codex_structured_output;
+mod grok_user_context;
 mod opencode_raw_input;
 
 use chrono::{DateTime, Utc};

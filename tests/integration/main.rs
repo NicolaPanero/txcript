@@ -16,6 +16,7 @@ mod cowork;
 mod cross_harness;
 mod cursor;
 mod cursor_desktop;
+mod fork_conversion_matrix;
 mod fx;
 mod grok;
 mod grok_bot;

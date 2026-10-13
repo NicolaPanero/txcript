@@ -530,6 +530,7 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     // Only pending patch calls need custom-tool results. Completed IDs can
     // be reused by a different tool later in the transcript.
     let mut pending_patch_ids = HashSet::new();
+    let mut pending_bash_ids = HashSet::new();
 
     for (i, msg) in messages.iter().enumerate() {
         let ts = msg.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -546,7 +547,13 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
             lines.push(meta_line(&msg.timestamp, "turn_context", tc));
         }
 
-        push_message_lines(&mut lines, msg, &ts, &mut pending_patch_ids);
+        push_message_lines(
+            &mut lines,
+            msg,
+            &ts,
+            &mut pending_patch_ids,
+            &mut pending_bash_ids,
+        );
 
         if matches!(msg.role, Role::Assistant)
             && let Some(usage) = msg.usage.as_ref()
@@ -579,6 +586,7 @@ fn push_message_lines<'a>(
     msg: &'a Message,
     ts: &str,
     pending_patch_ids: &mut HashSet<&'a str>,
+    pending_bash_ids: &mut HashSet<&'a str>,
 ) {
     let role_str = match msg.role {
         Role::User => "user",
@@ -634,6 +642,11 @@ fn push_message_lines<'a>(
                 } else {
                     pending_patch_ids.remove(id.as_str());
                 }
+                if matches!(tool, Tool::Bash { .. }) {
+                    pending_bash_ids.insert(id.as_str());
+                } else {
+                    pending_bash_ids.remove(id.as_str());
+                }
                 push_tool_use_lines(lines, ts, id, tool);
             }
             Block::ToolResult {
@@ -641,19 +654,15 @@ fn push_message_lines<'a>(
                 content,
                 is_error,
             } => {
-                let (kind, output) = if pending_patch_ids.remove(tool_use_id.as_str()) {
-                    (
-                        "custom_tool_call_output",
-                        custom_tool_output(content, *is_error),
-                    )
-                } else {
-                    ("function_call_output", tool_output_text(content))
-                };
-                lines.push(meta_line_str(
+                push_tool_result_lines(
+                    lines,
                     ts,
-                    "response_item",
-                    json!({ "type": kind, "call_id": tool_use_id, "output": output }),
-                ));
+                    tool_use_id,
+                    content,
+                    *is_error,
+                    pending_patch_ids,
+                    pending_bash_ids,
+                );
             }
         }
     }
@@ -675,6 +684,40 @@ fn push_message_lines<'a>(
             lines.push(meta_line_str(ts, "event_msg", event));
         }
     }
+}
+
+fn push_tool_result_lines(
+    lines: &mut Vec<Line>,
+    ts: &str,
+    tool_use_id: &str,
+    content: &ToolOutput,
+    is_error: bool,
+    pending_patch_ids: &mut HashSet<&str>,
+    pending_bash_ids: &mut HashSet<&str>,
+) {
+    if pending_bash_ids.remove(tool_use_id) {
+        lines.push(meta_line_str(
+            ts,
+            "event_msg",
+            json!({
+                "type": "exec_command_end", "call_id": tool_use_id,
+                "aggregated_output": tool_output_text(content), "exit_code": i64::from(is_error)
+            }),
+        ));
+    }
+    let (kind, output) = if pending_patch_ids.remove(tool_use_id) {
+        (
+            "custom_tool_call_output",
+            custom_tool_output(content, is_error),
+        )
+    } else {
+        ("function_call_output", tool_output_text(content))
+    };
+    lines.push(meta_line_str(
+        ts,
+        "response_item",
+        json!({ "type": kind, "call_id": tool_use_id, "output": output }),
+    ));
 }
 
 /// Emit the native call line for one tool invocation: `exec_command` for

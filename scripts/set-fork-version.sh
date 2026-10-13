@@ -5,7 +5,7 @@
 #   scripts/set-fork-version.sh 5      # 0.14.4-fork.5
 #
 # Then commit, and push a matching `v0.14.4-fork.5` tag: fork-release.yml
-# publishes the release and starts the Zed and Superset builds.
+# publishes the release and requests the Superset build.
 set -eu
 n="$1"
 base=$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' Cargo.toml | head -n 1)

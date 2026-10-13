@@ -47,6 +47,10 @@ use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
+#[path = "grok_user_content.rs"]
+mod user_content;
+use user_content::user_texts;
+
 /// The Grok CLI harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Grok;
@@ -284,6 +288,7 @@ struct DisplayIndex {
 struct PromptChunks {
     ts: Option<DateTime<Utc>>,
     images: Vec<ImageSource>,
+    text: String,
 }
 
 fn index_updates(updates: &[Value]) -> DisplayIndex {
@@ -326,6 +331,9 @@ fn index_updates(updates: &[Value]) -> DisplayIndex {
                 }
                 let prompt = &mut idx.prompts[slot];
                 prompt.ts.get_or_insert(ts);
+                if let Some(text) = content.get("text").and_then(Value::as_str) {
+                    prompt.text.push_str(text);
+                }
                 if is_image && let Some(source) = image_from_chunk(content) {
                     prompt.images.push(source);
                 }
@@ -385,7 +393,7 @@ fn update_ts(line: &Value) -> Option<DateTime<Utc>> {
 
 fn body_to_messages(body: &GrokSession, fallback_ts: DateTime<Utc>) -> Vec<Message> {
     let idx = index_updates(&body.updates);
-    let mut prompts = idx.prompts.iter();
+    let mut used_prompts: HashSet<usize> = HashSet::new();
     let mut thought_ts = idx.thought_ts.iter();
     let mut agent_ts = idx.agent_ts.iter();
 
@@ -400,25 +408,18 @@ fn body_to_messages(body: &GrokSession, fallback_ts: DateTime<Utc>) -> Vec<Messa
 
     for record in &body.chat_history {
         match record {
-            // Grok's injected `<user_info>` preamble is context, not a prompt.
-            ChatRecord::User(line) if is_user_info(&line.content) => {}
             ChatRecord::User(line) => {
-                let mut content = parse_user_blocks(&line.content);
-                // A prompt whose blocks parse to nothing carries no turn.
-                if !content.is_empty() {
-                    if in_turn {
-                        turn_last_assistant.push(current_last_assistant.take());
+                if let Some(message) = user_message(line, &idx, &mut used_prompts, fallback_ts) {
+                    if message.role == Role::User {
+                        if in_turn {
+                            turn_last_assistant.push(current_last_assistant.take());
+                        }
+                        if line.prior_turn_interrupt.is_some() && !turn_last_assistant.is_empty() {
+                            interrupted_turns.insert(turn_last_assistant.len() - 1);
+                        }
+                        in_turn = true;
                     }
-                    if line.prior_turn_interrupt.is_some() && !turn_last_assistant.is_empty() {
-                        interrupted_turns.insert(turn_last_assistant.len() - 1);
-                    }
-                    in_turn = true;
-                    // The prompt's images live only in the display log.
-                    let prompt = prompts.next();
-                    let images = prompt.map(|p| p.images.as_slice()).unwrap_or_default();
-                    content.extend(images.iter().cloned().map(|source| Block::Image { source }));
-                    let ts = prompt.and_then(|p| p.ts).unwrap_or(fallback_ts);
-                    messages.push(plain_message(Role::User, content, ts));
+                    messages.push(message);
                 }
             }
             ChatRecord::Assistant(line) => {
@@ -494,6 +495,48 @@ fn body_to_messages(body: &GrokSession, fallback_ts: DateTime<Utc>) -> Vec<Messa
     messages
 }
 
+fn user_message(
+    line: &UserLine,
+    idx: &DisplayIndex,
+    used: &mut HashSet<usize>,
+    fallback_ts: DateTime<Utc>,
+) -> Option<Message> {
+    let reason = line.extra.get("synthetic_reason").and_then(Value::as_str);
+    let prompt = idx.prompts.iter().enumerate().find(|(i, p)| {
+        !used.contains(i)
+            && (user_content::matches_prompt(&line.content, &p.text)
+                || (p.text.is_empty()
+                    && !p.images.is_empty()
+                    && user_texts(&line.content).all(|s| s.trim().is_empty())))
+    });
+    let (role, content) =
+        user_content::user_blocks(&line.content, reason, prompt.map(|(_, p)| p.text.as_str()));
+    let (role, mut content) = if reason.is_none()
+        && role == Role::User
+        && !content.is_empty()
+        && prompt.is_none()
+        && !idx.prompts.is_empty()
+    {
+        user_content::user_blocks(&line.content, Some("legacy_runtime_context"), None)
+    } else {
+        (role, content)
+    };
+    if role == Role::User
+        && let Some((i, prompt)) = prompt
+    {
+        used.insert(i);
+        content.extend(
+            prompt
+                .images
+                .iter()
+                .cloned()
+                .map(|source| Block::Image { source }),
+        );
+    }
+    let ts = prompt.and_then(|(_, p)| p.ts).unwrap_or(fallback_ts);
+    (!content.is_empty()).then(|| plain_message(role, content, ts))
+}
+
 /// `turn_completed` events arrive one per prompt turn, in order; apply each
 /// turn's stop reason to its last assistant message. `prior_turn_interrupt`
 /// flags are the fallback for turns whose `turn_completed` never landed.
@@ -558,45 +601,6 @@ fn assistant_blocks(line: &AssistantLine) -> (Vec<Block>, Option<String>) {
     (content, first_call_id)
 }
 
-fn is_user_info(content: &Value) -> bool {
-    user_texts(content).any(|t| t.contains("<user_info>"))
-}
-
-fn user_texts(content: &Value) -> impl Iterator<Item = &str> {
-    let out: Vec<&str> = match content {
-        Value::String(s) => vec![s.as_str()],
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|block| block.get("text").and_then(Value::as_str))
-            .collect(),
-        // Other JSON shapes carry no user text.
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
-    };
-    out.into_iter()
-}
-
-fn parse_user_blocks(content: &Value) -> Vec<Block> {
-    match content {
-        Value::String(s) => text_block(s).into_iter().collect(),
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|v| match v.get("type").and_then(Value::as_str) {
-                Some("text") => text_block(v.get("text").and_then(Value::as_str).unwrap_or("")),
-                // Non-text chunk kinds (images live in the display log)
-                // parse to nothing.
-                _ => None,
-            })
-            .collect(),
-        // Other JSON shapes hold no prompt blocks.
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
-    }
-}
-
-fn text_block(raw: &str) -> Option<Block> {
-    let text = strip_user_query(raw);
-    (!text.trim().is_empty()).then_some(Block::Text { text })
-}
-
 /// An ACP image content block from a `user_message_chunk`:
 /// `{"type": "image", "data": <base64>, "mimeType": …}`.
 fn image_from_chunk(content: &Value) -> Option<ImageSource> {
@@ -605,18 +609,6 @@ fn image_from_chunk(content: &Value) -> Option<ImageSource> {
         media_type: content.get("mimeType")?.as_str()?.to_string(),
         data: content.get("data")?.as_str()?.to_string(),
     })
-}
-
-fn strip_user_query(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("<user_query>")
-        .and_then(|s| s.strip_suffix("</user_query>"))
-    {
-        inner.trim().to_string()
-    } else {
-        text.to_string()
-    }
 }
 
 fn wrap_user_query(text: &str) -> String {
