@@ -47,6 +47,31 @@ fn strip_runtime_tags(text: &str) -> String {
     text
 }
 
+fn strip_prefix_tags<'a>(mut text: &'a str, tags: &[&str]) -> &'a str {
+    loop {
+        let trimmed = text.trim_start();
+        let Some(range) = tags
+            .iter()
+            .find_map(|tag| tag_range(trimmed, tag).filter(|r| r.start == 0))
+        else {
+            return text;
+        };
+        text = &trimmed[range.end..];
+    }
+}
+
+fn extract_query(raw: &str) -> String {
+    let text = strip_prefix_tags(raw, RUNTIME_TAGS).trim();
+    if text.starts_with("<user_query>") && text.contains("</user_query>") {
+        let query = query_text(text);
+        strip_prefix_tags(query, &["system-reminder", "system_reminder"])
+            .trim()
+            .to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 fn query_text(text: &str) -> &str {
     let text = text.trim();
     if let Some(start) = text.find("<user_query>") {
@@ -115,11 +140,8 @@ pub(super) fn user_blocks(
                     text: raw.to_string(),
                 });
             }
-            let stripped = strip_runtime_tags(raw);
-            let text = query_text(&stripped);
-            (!text.trim().is_empty() && text != "__auto_continue__").then(|| Block::Text {
-                text: text.to_string(),
-            })
+            let text = extract_query(raw);
+            (!text.trim().is_empty() && text != "__auto_continue__").then_some(Block::Text { text })
         })
         .collect();
     if blocks.is_empty()

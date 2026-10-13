@@ -30,7 +30,8 @@ version. `v0.14.4-fork.3` is Superset's
 order for Cursor to the library, so the CLI's exports get it too; `fork.5`
 skips Codex's AGENTS.md prelude; `fork.6` publishes releases automatically; `fork.7` adds `list --json`; `fork.8` adds `--under`, `--preview` and
 `updated_at` to it. `fork.9` fixes Grok context attribution, literal tag
-examples and Codex shell errors, and adds the conversion regression matrix.
+examples and Codex shell errors, and adds the conversion regression matrix. `fork.10` also preserves literal
+tag examples when a Grok export has no display log.
 
 ## Releasing
 
@@ -52,8 +53,8 @@ its pin. Zed no longer participates in this release flow.
 runs the library, native format integration tests, regression tests and
 property-based codec checks. `cargo test --locked -p txcript --example
 superset-transfer --no-default-features --features opencode` verifies the
-conversion helper. These checks run on pushes to `fork` and before releases. The strict lint
-gate uses the declared Rust 1.96 toolchain, matching local validation.
+conversion helper. These checks run on pushes to `fork` and before releases. Lint and release builds use the declared Rust 1.96 toolchain, matching local
+validation.
 
 The explicit matrix covers all 20 directions between Claude Code, Codex,
 Cursor Agent, Grok and OpenCode, plus each codec's own serialization cycle.

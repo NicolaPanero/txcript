@@ -216,3 +216,13 @@ fn legacy_untagged_summary_is_not_a_user_prompt_when_display_log_identifies_the_
                 .any(|b| matches!(b,Block::Text{text} if text.contains("changed two files")))
     }));
 }
+
+#[test]
+fn wrapped_literal_examples_survive_when_the_display_log_is_missing() {
+    let raw = "Explain <user_info>example</user_info>";
+    let grok = session(
+        vec![json!({"type":"user","content":format!("<user_query>{raw}</user_query>")})],
+        vec![],
+    );
+    assert_eq!(user_texts(&Grok::to_common(&grok).unwrap()), [raw]);
+}

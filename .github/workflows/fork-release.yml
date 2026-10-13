@@ -37,7 +37,7 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96
 
       - uses: Swatinem/rust-cache@v2
 
