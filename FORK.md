@@ -52,7 +52,8 @@ its pin. Zed no longer participates in this release flow.
 runs the library, native format integration tests, regression tests and
 property-based codec checks. `cargo test --locked -p txcript --example
 superset-transfer --no-default-features --features opencode` verifies the
-conversion helper. These checks run on pushes to `fork` and before releases.
+conversion helper. These checks run on pushes to `fork` and before releases. The strict lint
+gate uses the declared Rust 1.96 toolchain, matching local validation.
 
 The explicit matrix covers all 20 directions between Claude Code, Codex,
 Cursor Agent, Grok and OpenCode, plus each codec's own serialization cycle.
