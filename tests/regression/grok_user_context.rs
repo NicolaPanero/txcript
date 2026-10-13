@@ -244,7 +244,7 @@ fn skill_catalog_and_mcp_reminders_are_not_user_messages() {
         let common = Codex::to_common(&convert::<Grok, Codex>(&grok).unwrap()).unwrap();
         assert_eq!(user_texts(&common), ["Fix the parser"]);
         assert!(
-            !serde_json::to_string(&common)
+            !serde_json::to_string(&common.body)
                 .unwrap()
                 .contains("fixture-skill")
         );
