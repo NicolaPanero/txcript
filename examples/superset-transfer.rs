@@ -11,7 +11,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.13";
+const ENGINE: &str = "0.14.4-fork.14";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 const ADAPTERS: [&str; 5] = ["claude_code", "codex", "cursor", "grok", "opencode"];
 
@@ -201,7 +201,11 @@ fn caller_reference(
     let relative = reference
         .strip_prefix(canonical_root)
         .map_err(|_| "target_validation_failed")?;
-    Ok(requested_root.join(relative))
+    if relative.as_os_str().is_empty() {
+        Ok(requested_root.to_path_buf())
+    } else {
+        Ok(requested_root.join(relative))
+    }
 }
 
 fn convert(req: &Request) -> Result<Value, String> {
@@ -362,8 +366,10 @@ mod tests {
             requested.join("nested").join("session.jsonl")
         );
         assert_eq!(
-            caller_reference(&actual, &actual, &requested).unwrap(),
-            requested
+            caller_reference(&actual, &actual, &requested)
+                .unwrap()
+                .as_os_str(),
+            requested.as_os_str()
         );
         assert_eq!(
             caller_reference(&PathBuf::from("outside/session.jsonl"), &actual, &requested)
