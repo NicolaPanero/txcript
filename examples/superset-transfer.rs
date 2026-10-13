@@ -11,7 +11,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.12";
+const ENGINE: &str = "0.14.4-fork.13";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 const ADAPTERS: [&str; 5] = ["claude_code", "codex", "cursor", "grok", "opencode"];
 
@@ -193,6 +193,17 @@ fn normalize_tool_ids(messages: &mut [Message]) -> BTreeMap<String, String> {
     aliases
 }
 
+fn caller_reference(
+    reference: &Path,
+    canonical_root: &Path,
+    requested_root: &Path,
+) -> Result<PathBuf, String> {
+    let relative = reference
+        .strip_prefix(canonical_root)
+        .map_err(|_| "target_validation_failed")?;
+    Ok(requested_root.join(relative))
+}
+
 fn convert(req: &Request) -> Result<Value, String> {
     let (cwd, mut common) = validated_source(req)?;
     let target = target_harness(&req.target_agent)?;
@@ -246,7 +257,12 @@ fn convert(req: &Request) -> Result<Value, String> {
     }
     .to_string();
     common.meta.timestamp = Utc::now();
-    common.meta.cwd = Some(cwd.to_string_lossy().into_owned());
+    let caller_cwd = if req.cwd.is_absolute() {
+        req.cwd.clone()
+    } else {
+        cwd.clone()
+    };
+    common.meta.cwd = Some(caller_cwd.to_string_lossy().into_owned());
     common.meta.model = None;
     common.meta.lineage = None;
     let tool_id_map = normalize_tool_ids(&mut common.body);
@@ -286,9 +302,18 @@ fn convert(req: &Request) -> Result<Value, String> {
     {
         return Err("target_validation_failed".into());
     }
+    let written_path = Path::new(&reference)
+        .canonicalize()
+        .map_err(|_| "target_validation_failed")?;
+    let requested_root = if req.target_root.is_absolute() {
+        &req.target_root
+    } else {
+        &target_root
+    };
+    let reference = caller_reference(&written_path, &target_root, requested_root)?;
     Ok(
         json!({"protocolVersion":1,"engineVersion":ENGINE,"targetAgent":req.target_agent,
-        "targetSessionId":written.id,"reference":reference,"cwd":cwd,"messageCount":messages,"warnings":warnings,"toolIdMap":tool_id_map}),
+        "targetSessionId":written.id,"reference":reference,"cwd":caller_cwd,"messageCount":messages,"warnings":warnings,"toolIdMap":tool_id_map}),
     )
 }
 
@@ -327,6 +352,26 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use txcript::common::{Role, Tool};
+    #[test]
+    fn maps_verified_target_to_callers_path_spelling_without_allowing_escape() {
+        let actual = PathBuf::from("actual");
+        let requested = PathBuf::from("caller");
+        let reference = actual.join("nested").join("session.jsonl");
+        assert_eq!(
+            caller_reference(&reference, &actual, &requested).unwrap(),
+            requested.join("nested").join("session.jsonl")
+        );
+        assert_eq!(
+            caller_reference(&actual, &actual, &requested).unwrap(),
+            requested
+        );
+        assert_eq!(
+            caller_reference(&PathBuf::from("outside/session.jsonl"), &actual, &requested)
+                .unwrap_err(),
+            "target_validation_failed"
+        );
+    }
+
     #[test]
     fn aliases_invalid_ids_without_collisions_and_keeps_results_paired() {
         let invalid = "functions.shell:call.with.a.long.identifier.that.exceeds.the.targets.sixty.four.characters";
