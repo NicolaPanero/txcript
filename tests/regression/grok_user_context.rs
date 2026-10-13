@@ -226,3 +226,27 @@ fn wrapped_literal_examples_survive_when_the_display_log_is_missing() {
     );
     assert_eq!(user_texts(&Grok::to_common(&grok).unwrap()), [raw]);
 }
+
+#[test]
+fn skill_catalog_and_mcp_reminders_are_not_user_messages() {
+    let skills = format!(
+        "<system-reminder>The following skills are available for use:\n{}\n</system-reminder>",
+        "- fixture-skill: Synthetic description. Path: /fixture/skills/test/SKILL.md\n".repeat(800)
+    );
+    let mcp = "<system-reminder>MCP servers connected: fixture-browser, fixture-database. Synthetic tool documentation.</system-reminder>";
+    for content in [
+        json!(format!(
+            "{skills}\n{mcp}\n<user_query>Fix the parser</user_query>"
+        )),
+        json!([{"type":"text","text":skills},{"type":"text","text":mcp},{"type":"text","text":"<user_query>Fix the parser</user_query>"}]),
+    ] {
+        let grok = session(vec![json!({"type":"user","content":content})], vec![]);
+        let common = Codex::to_common(&convert::<Grok, Codex>(&grok).unwrap()).unwrap();
+        assert_eq!(user_texts(&common), ["Fix the parser"]);
+        assert!(
+            !serde_json::to_string(&common)
+                .unwrap()
+                .contains("fixture-skill")
+        );
+    }
+}
