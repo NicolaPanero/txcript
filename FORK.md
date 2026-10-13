@@ -41,7 +41,7 @@ tag examples when a Grok export has no display log.
 3. Push the branch and a `v<version>-fork.<N>` tag.
 
 `.github/workflows/fork-release.yml` then tests, builds the `txcript` CLI and
-the `superset-transfer` helper for Apple Silicon, and publishes them as the
+the `superset-transfer` helper for Apple Silicon and Windows x64, and publishes them as the
 latest release. Superset++ pins the tested version in
 `scripts/fork/txcript-version.json`; update that pin only after the txcript
 release succeeds. A dispatch requests a Superset build but does not advance
