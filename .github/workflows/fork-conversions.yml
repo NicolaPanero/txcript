@@ -9,10 +9,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: fork-conversions-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   conversions:
     if: github.repository == 'NicolaPanero/txcript'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.96

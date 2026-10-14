@@ -14,11 +14,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: upstream-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   RUSTFLAGS: -D warnings
 
 jobs:
   build:
+    if: github.repository != 'NicolaPanero/txcript' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 45
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:

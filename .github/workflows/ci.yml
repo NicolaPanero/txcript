@@ -8,9 +8,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
+
+concurrency:
+  group: upstream-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   RUSTFLAGS: -D warnings
@@ -18,6 +23,7 @@ env:
 jobs:
   lint-test:
     name: Lint and test (stable)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -34,6 +40,7 @@ jobs:
 
   windows:
     name: Lint and test (windows)
+    timeout-minutes: 30
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -48,6 +55,7 @@ jobs:
 
   wasm:
     name: wasm32 build
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -62,6 +70,7 @@ jobs:
 
   msrv:
     name: MSRV (1.96)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -75,6 +84,7 @@ jobs:
   # packaging steps the release runs are proven here, on the PR.
   crate-package:
     name: crates.io package (dry-run)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -86,6 +96,7 @@ jobs:
 
   npm-package:
     name: npm package (dry-run)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -107,6 +118,7 @@ jobs:
 
   cli-release-build:
     name: CLI release build
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

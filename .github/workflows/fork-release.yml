@@ -11,17 +11,52 @@ permissions:
   contents: write
 concurrency:
   group: fork-release
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
 defaults:
   run:
     shell: bash
 jobs:
-  build:
+  check:
     if: github.repository == 'NicolaPanero/txcript'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.release.outputs.sha }}
+      build: ${{ steps.release.outputs.build }}
+    steps:
+      - name: Wait for a stable tag push
+        if: github.event_name == 'push'
+        run: sleep 60
+      - name: Resolve an immutable release before platform builds
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$ ]]
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          build=true
+          latest=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref | sub("refs/tags/"; "")' |
+            grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$' | sort -V | tail -n 1)
+          if [ "$EVENT_NAME" = push ] && [ "$TAG" != "$latest" ]; then build=false; fi
+          release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets 2>/dev/null || true)
+          if [ -n "$release" ]; then
+            if echo "$release" | jq -e '.isDraft == false and ([.assets[].name] | contains(["txcript-aarch64-apple-darwin.tar.gz", "superset-transfer-aarch64-apple-darwin.tar.gz", "txcript-x86_64-pc-windows-msvc.zip", "superset-transfer-x86_64-pc-windows-msvc.zip", "SHA256SUMS"]))' >/dev/null; then
+              build=false
+            else
+              echo "::error::An incomplete immutable release already exists; repair it or use a new tag."
+              exit 1
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - os: macos-15
@@ -29,19 +64,30 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ needs.check.outputs.sha }}
+      - name: Reuse verified archives for this platform and immutable commit
+        id: package-cache
+        uses: actions/cache@v4
+        with:
+          key: txcript-tools-v1-${{ matrix.target }}-${{ needs.check.outputs.sha }}
+          path: |
+            *-aarch64-apple-darwin.tar.gz
+            *-x86_64-pc-windows-msvc.zip
+            SHA256SUMS-*
       - uses: dtolnay/rust-toolchain@1.96
+        if: steps.package-cache.outputs.cache-hit != 'true'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        if: steps.package-cache.outputs.cache-hit != 'true'
         with:
           key: ${{ matrix.target }}
       - name: Install Windows assembler
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.package-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           choco install nasm --no-progress -y
@@ -54,17 +100,19 @@ jobs:
           test "$cli" = "$version"
           test "$engine" = "$version"
       - name: Test codecs and conversion helper
+        if: steps.package-cache.outputs.cache-hit != 'true'
         run: |
           cargo fmt --all --check
           cargo clippy --locked -p txcript --no-default-features --features opencode --all-targets -- -D warnings
           cargo test --locked -p txcript --no-default-features --features opencode
           cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode
       - name: Build native tools
+        if: steps.package-cache.outputs.cache-hit != 'true'
         run: |
           cargo build --release --locked -p txcript-cli
           cargo build --release --locked -p txcript --example superset-transfer --no-default-features --features opencode
       - name: Package macOS
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.package-cache.outputs.cache-hit != 'true'
         run: |
           target/release/txcript --version | grep -qx "txcript ${TAG#v}"
           target/release/examples/superset-transfer capabilities
@@ -75,7 +123,7 @@ jobs:
           tar -czf superset-transfer-aarch64-apple-darwin.tar.gz -C dist/helper superset-transfer LICENSE
           shasum -a 256 *-aarch64-apple-darwin.tar.gz > SHA256SUMS-mac
       - name: Package Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.package-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           if ((& ./target/release/txcript.exe --version) -ne "txcript $($env:TAG.Substring(1))") { throw "Version mismatch" }
@@ -96,7 +144,7 @@ jobs:
             SHA256SUMS-*
           if-no-files-found: error
   publish:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -107,10 +155,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          current_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          test "$current_sha" = '${{ needs.check.outputs.sha }}' || { echo "Tag changed during build; refusing publication"; exit 1; }
+          latest=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref | sub("refs/tags/"; "")' |
+            grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$' | sort -V | tail -n 1)
+          if [ '${{ github.event_name }}' = push ] && [ "$TAG" != "$latest" ]; then echo "Superseded release: $TAG"; exit 0; fi
+          latest_flag=--latest=false
+          if [ "$TAG" = "$latest" ]; then latest_flag=--latest; fi
           cat SHA256SUMS-* > SHA256SUMS
           sha256sum --check SHA256SUMS
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release already exists; preserving immutable assets"
             exit 0
           fi
-          gh release create "$TAG" *-aarch64-apple-darwin.tar.gz *-x86_64-pc-windows-msvc.zip SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "txcript ${TAG#v}" --notes "Verified CLI and conversion helper for Apple Silicon macOS and Windows x64." --latest
+          gh release create "$TAG" *-aarch64-apple-darwin.tar.gz *-x86_64-pc-windows-msvc.zip SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "txcript ${TAG#v}" --notes "Verified CLI and conversion helper for Apple Silicon macOS and Windows x64." "$latest_flag"
