@@ -48,6 +48,51 @@ pub struct MessageRecord {
     pub parts: Vec<Value>,
 }
 
+/// The session as `OpenCode` itself would continue it: the latest compaction
+/// summary, then the tail it kept verbatim (from `tail_start_id` up to the
+/// compaction request), then everything after the summary.
+#[must_use]
+pub fn active_context(export: &Export) -> Export {
+    let messages = &export.messages;
+    let is_summary = |m: &MessageRecord| {
+        m.info.get("role").and_then(Value::as_str) == Some("assistant")
+            && m.info.get("summary").and_then(Value::as_bool) == Some(true)
+    };
+    let id = |m: &MessageRecord| m.info.get("id").and_then(Value::as_str).map(str::to_owned);
+    let Some(summary) = messages.iter().rposition(is_summary) else {
+        return export.clone();
+    };
+    let request = messages[summary]
+        .info
+        .get("parentID")
+        .and_then(Value::as_str)
+        .and_then(|parent| {
+            messages
+                .iter()
+                .position(|m| id(m).as_deref() == Some(parent))
+        });
+    let tail = request.and_then(|request| {
+        let tail_id = messages[request].parts.iter().find_map(|part| {
+            (part.get("type").and_then(Value::as_str) == Some("compaction"))
+                .then(|| part.get("tail_start_id").and_then(Value::as_str))
+                .flatten()
+        })?;
+        let start = messages
+            .iter()
+            .position(|m| id(m).as_deref() == Some(tail_id))?;
+        (start < request).then_some(start..request)
+    });
+    let mut kept = vec![messages[summary].clone()];
+    if let Some(range) = tail {
+        kept.extend(messages[range].iter().cloned());
+    }
+    kept.extend(messages[summary + 1..].iter().cloned());
+    Export {
+        info: export.info.clone(),
+        messages: kept,
+    }
+}
+
 // ── codec: to_common ───────────────────────────────────────────────────
 
 impl Codec for OpenCode {

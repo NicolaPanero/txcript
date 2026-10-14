@@ -52,6 +52,39 @@ pub struct Line {
     pub extra: Map<String, Value>,
 }
 
+/// The rollout as Codex itself would resume it. A `compacted` line holds the
+/// history Codex kept (`replacement_history`: retained messages plus an
+/// encrypted summary only Codex can read); everything before it is history the
+/// model no longer sees. Returns the lines from the last compaction on, with
+/// the kept messages restored in place of the compaction line.
+#[must_use]
+pub fn active_context(lines: &[Line]) -> Vec<Line> {
+    let Some(last) = lines.iter().rposition(|l| l.kind == "compacted") else {
+        return lines.to_vec();
+    };
+    let compacted = &lines[last];
+    let mut out: Vec<Line> = lines
+        .iter()
+        .find(|l| l.kind == "session_meta")
+        .cloned()
+        .into_iter()
+        .collect();
+    if let Some(items) = compacted
+        .payload
+        .get("replacement_history")
+        .and_then(Value::as_array)
+    {
+        out.extend(items.iter().cloned().map(|payload| Line {
+            timestamp: compacted.timestamp.clone(),
+            kind: "response_item".into(),
+            payload,
+            extra: Map::new(),
+        }));
+    }
+    out.extend(lines[last + 1..].iter().cloned());
+    out
+}
+
 // ── codec: to_common ───────────────────────────────────────────────────
 
 #[derive(Clone)]

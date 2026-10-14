@@ -152,6 +152,18 @@ impl<'de> Deserialize<'de> for Record {
     }
 }
 
+/// The session as Claude Code itself would resume it: from the last
+/// `compact_boundary` on. Records before it are history the model no longer
+/// sees; the compaction summary right after the boundary stands in for them.
+#[must_use]
+pub fn active_context(records: &[Record]) -> Vec<Record> {
+    let boundary = records.iter().rposition(|r| {
+        matches!(r, Record::Other(v)
+            if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary"))
+    });
+    boundary.map_or_else(|| records.to_vec(), |i| records[i..].to_vec())
+}
+
 // ── codec ──────────────────────────────────────────────────────────────
 
 impl Codec for ClaudeCode {

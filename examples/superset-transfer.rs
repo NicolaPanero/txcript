@@ -4,15 +4,22 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use txcript::common::Role;
 use txcript::common::{Block, Message, ToolOutput};
 use txcript::harness::{
-    claude_code::ClaudeStore, codex::CodexStore, cursor::CursorStore, grok::GrokStore,
-    opencode::OpenCodeStore,
+    claude_code::{self, ClaudeStore},
+    codex::{self, CodexStore},
+    cursor::CursorStore,
+    grok::GrokStore,
+    opencode::{self, OpenCodeStore},
 };
-use txcript::{Codec, Common, HarnessId, Store, Transcript};
+use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.15";
+const ENGINE: &str = "0.14.4-fork.16";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
+/// About 140k tokens of JSON: what a target agent can take in one prompt and
+/// still compact.
+const MAX_CONTEXT_BYTES: usize = 480_000;
 const ADAPTERS: [&str; 5] = ["claude_code", "codex", "cursor", "grok", "opencode"];
 
 #[derive(Deserialize)]
@@ -27,22 +34,37 @@ struct Request {
     cwd: PathBuf,
 }
 
-fn read<S>(store: &S, reference: &S::Ref) -> Result<Transcript<Common>, String>
+fn read<S>(
+    store: &S,
+    reference: &S::Ref,
+    active: impl FnOnce(&mut Transcript<S::H>),
+) -> Result<Transcript<Common>, String>
 where
     S: Store,
     S::H: Codec,
 {
-    let native = store.load(reference).map_err(|_| "source_unreadable")?;
+    let mut native = store.load(reference).map_err(|_| "source_unreadable")?;
+    active(&mut native);
     S::H::to_common(&native).map_err(|_| "source_conversion_failed".into())
 }
 
 fn read_source(req: &Request, root: &Path, reference: &Path) -> Result<Transcript<Common>, String> {
     match req.source_agent.as_str() {
-        "claude_code" => read(&ClaudeStore::new(root), &reference.to_path_buf()),
-        "codex" => read(&CodexStore::new(root), &reference.to_path_buf()),
-        "cursor" => read(&CursorStore::new(root), &reference.to_path_buf()),
-        "grok" => read(&GrokStore::new(root), &reference.to_path_buf()),
-        "opencode" => read(&OpenCodeStore::new(reference), &req.source_session_id),
+        "claude_code" => read(&ClaudeStore::new(root), &reference.to_path_buf(), |t| {
+            t.body = claude_code::active_context(&t.body);
+        }),
+        "codex" => read(&CodexStore::new(root), &reference.to_path_buf(), |t| {
+            t.body = codex::active_context(&t.body);
+        }),
+        "cursor" => read(&CursorStore::new(root), &reference.to_path_buf(), |_| {}),
+        "grok" => read(&GrokStore::new(root), &reference.to_path_buf(), |_| {}),
+        "opencode" => read(
+            &OpenCodeStore::new(reference),
+            &req.source_session_id,
+            |t| {
+                t.body = opencode::active_context(&t.body);
+            },
+        ),
         _ => Err("source_not_verified".into()),
     }
 }
@@ -208,6 +230,69 @@ fn caller_reference(
     }
 }
 
+/// What a message costs in the target's prompt: its text, tool input and
+/// output, not the provider bookkeeping the canonical form carries.
+fn encoded_len(message: &Message) -> usize {
+    fn json_len<T: serde::Serialize>(value: &T) -> usize {
+        serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+    }
+    message
+        .content
+        .iter()
+        .map(|block| match block {
+            Block::Text { text } | Block::Thinking { text, .. } => text.len(),
+            Block::ToolUse { tool, .. } => json_len(tool),
+            Block::ToolResult { content, .. } => json_len(content),
+            Block::Image { .. } | Block::Artifact { .. } => 2_000,
+        })
+        .sum()
+}
+
+/// Keeps the newest messages that fit `MAX_CONTEXT_BYTES`, never separating a
+/// tool call from its result, and opens with a user turn so every target
+/// accepts it. Returns whether anything was dropped.
+fn fit_context(common: &mut Transcript<Common>) -> Result<bool, String> {
+    let sizes: Vec<usize> = common.body.iter().map(encoded_len).collect();
+    let mut start = common.body.len();
+    let mut total = 0;
+    while start > 0 && total + sizes[start - 1] <= MAX_CONTEXT_BYTES {
+        start -= 1;
+        total += sizes[start];
+    }
+    let trimmed = start > 0;
+    if trimmed {
+        let len = common.body.len();
+        let start = start.min(len - 1);
+        let cropped = (start..len).find_map(|from| match common.crop(&Span(from..len)) {
+            Ok(cropped) => Some(Ok(cropped)),
+            Err(CropError::SplitToolPair { .. }) => None,
+            Err(_) => Some(Err("source_conversion_failed".to_string())),
+        });
+        *common = cropped.ok_or("source_conversion_failed")??;
+    }
+    if common
+        .body
+        .first()
+        .is_some_and(|m| m.role == Role::Assistant)
+    {
+        let timestamp = common.body[0].timestamp;
+        common.body.insert(
+            0,
+            Message {
+                role: Role::User,
+                content: vec![Block::Text {
+                    text: "Earlier parts of this conversation were summarized or omitted when it was moved to this agent. Continue from what follows.".into(),
+                }],
+                timestamp,
+                model: None,
+                stop_reason: None,
+                usage: None,
+            },
+        );
+    }
+    Ok(trimmed)
+}
+
 fn conversion_warnings(target: HarnessId, messages: &[Message]) -> Vec<&'static str> {
     let mut warnings =
         vec!["Runtime permissions, MCP configuration and credentials are not transferred."];
@@ -270,7 +355,11 @@ fn convert(req: &Request) -> Result<Value, String> {
             return Err("target_store_mismatch".into());
         }
     }
+    let trimmed = fit_context(&mut common)?;
     let mut warnings = conversion_warnings(target, &common.body);
+    if trimmed {
+        warnings.push("Older messages were left out so the chat fits the target's context window.");
+    }
     common.meta.id = if target == HarnessId::Codex {
         uuid::Uuid::now_v7()
     } else {
