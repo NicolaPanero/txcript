@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.18";
+const ENGINE: &str = "0.14.4-fork.19";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// A long session's file keeps every compacted window; only the last one is
 /// carried, and `MAX_SOURCE` bounds that.
@@ -319,6 +319,76 @@ fn fit_context(common: &mut Transcript<Common>) -> Result<bool, String> {
     Ok(trimmed)
 }
 
+const AGENT_MARKUP_TAGS: [&str; 7] = [
+    "environment_context",
+    "system-reminder",
+    "turn_aborted",
+    "user_action",
+    "permissions",
+    "collaboration_mode",
+    "user_instructions",
+];
+
+/// Text an agent injects under the user role to drive its own app: hidden
+/// there, and noise to any other agent.
+fn is_agent_markup(text: &str) -> bool {
+    let text = text.trim();
+    if text == "</image>"
+        || (text.starts_with("<image ") || text == "<image>")
+            && text.ends_with('>')
+            && !text.contains('\n')
+    {
+        return true;
+    }
+    let Some(rest) = text.strip_prefix('<') else {
+        return false;
+    };
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    !name.is_empty()
+        && (name.starts_with("external_")
+            || name.starts_with("command-")
+            || name.starts_with("local-command-")
+            || AGENT_MARKUP_TAGS.contains(&name.as_str()))
+        && text.ends_with(&format!("</{name}>"))
+}
+
+/// Codex wraps a prompt that has attachments in a file listing; the prompt is
+/// what follows its "## My request" heading.
+fn attachment_prompt(text: &str) -> Option<&str> {
+    if !text
+        .trim_start()
+        .starts_with("# Files mentioned by the user:")
+    {
+        return None;
+    }
+    let heading = text.rfind("\n## My request")?;
+    let body = &text[heading + 1..];
+    Some(body.split_once('\n').map_or("", |(_, rest)| rest))
+}
+
+/// Drops agent markup from user turns and unwraps attachment listings, so the
+/// target sees the prompt and its images as the user gave them.
+fn clean_user_markup(messages: &mut Vec<Message>) {
+    for message in messages.iter_mut().filter(|m| m.role == Role::User) {
+        message.content.retain_mut(|block| match block {
+            Block::Text { text } => {
+                if is_agent_markup(text) {
+                    return false;
+                }
+                if let Some(prompt) = attachment_prompt(text) {
+                    *text = prompt.to_string();
+                }
+                !text.trim().is_empty()
+            }
+            _ => true,
+        });
+    }
+    messages.retain(|m| !m.content.is_empty());
+}
+
 fn conversion_warnings(target: HarnessId, messages: &[Message]) -> Vec<&'static str> {
     let mut warnings =
         vec!["Runtime permissions, MCP configuration and credentials are not transferred."];
@@ -381,6 +451,7 @@ fn convert(req: &Request) -> Result<Value, String> {
             return Err("target_store_mismatch".into());
         }
     }
+    clean_user_markup(&mut common.body);
     let trimmed = fit_context(&mut common)?;
     let mut warnings = conversion_warnings(target, &common.body);
     if trimmed {
@@ -461,11 +532,19 @@ struct HistoryRequest {
     source_session_id: String,
     source_root: PathBuf,
     source_reference: PathBuf,
+    /// Page before this message index; the first page ends where the
+    /// transfer's carried context starts.
+    #[serde(default)]
+    before: Option<usize>,
 }
 
 const HISTORY_TEXT_BYTES: usize = 20_000;
 const HISTORY_TOOL_BYTES: usize = 2_000;
-const HISTORY_OUTPUT_BYTES: usize = 800_000;
+/// Below the host's 1 MiB cap on helper output, images included.
+const HISTORY_PAGE_BYTES: usize = 700_000;
+/// Image data sent per message; images past it are listed but not sent, so
+/// one message cannot fill a page alone.
+const HISTORY_IMAGE_BYTES: usize = 600_000;
 
 fn clip(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -502,8 +581,51 @@ fn tool_summary(tool: &txcript::common::Tool) -> (String, String) {
     (name, detail)
 }
 
-/// The messages that came before what a transfer carries, shaped for display:
-/// text, reasoning and tool calls with their results paired.
+fn history_message(
+    index: usize,
+    message: &Message,
+    results: &BTreeMap<String, (String, bool)>,
+) -> Option<Value> {
+    let mut blocks = Vec::new();
+    let mut image_budget = HISTORY_IMAGE_BYTES;
+    for block in &message.content {
+        match block {
+            Block::Text { text } if !text.trim().is_empty() => {
+                blocks.push(json!({"type":"text","text":clip(text, HISTORY_TEXT_BYTES)}));
+            }
+            Block::Thinking { text, .. } if !text.trim().is_empty() => {
+                blocks.push(json!({"type":"thinking","text":clip(text, HISTORY_TEXT_BYTES)}));
+            }
+            Block::ToolUse { id, tool } => {
+                let (name, input) = tool_summary(tool);
+                let (output, is_error) = results.get(id).cloned().unwrap_or_default();
+                blocks.push(json!({"type":"tool","id":id,"name":name,"input":input,"output":output,"isError":is_error}));
+            }
+            Block::Image { source } if source.source_type == "base64" => {
+                blocks.push(if source.data.len() <= image_budget {
+                    image_budget -= source.data.len();
+                    json!({"type":"image","mediaType":source.media_type,"data":source.data})
+                } else {
+                    json!({"type":"image","mediaType":source.media_type,"omitted":true})
+                });
+            }
+            _ => {}
+        }
+    }
+    (!blocks.is_empty()).then(|| {
+        json!({
+            "index": index,
+            "role": if message.role == Role::User { "user" } else { "assistant" },
+            "timestampMs": message.timestamp.timestamp_millis(),
+            "blocks": blocks,
+        })
+    })
+}
+
+/// One page of the messages a transfer left out, newest first in paging and
+/// chronological in the page, shaped for display. `nextBefore` pages further
+/// back; indices count from the start of the session, which only grows at
+/// its end, so they stay valid while the source goes on.
 fn history(req: &HistoryRequest) -> Result<Value, String> {
     let root = req
         .source_root
@@ -516,20 +638,21 @@ fn history(req: &HistoryRequest) -> Result<Value, String> {
     if !reference.starts_with(&root) {
         return Err("source_outside_store".into());
     }
-    let full = read_agent(
-        &req.source_agent,
-        &req.source_session_id,
-        &root,
-        &reference,
-        false,
-    )?;
-    let mut carried = read_agent(
-        &req.source_agent,
-        &req.source_session_id,
-        &root,
-        &reference,
-        true,
-    )?;
+    let read = |active| {
+        read_agent(
+            &req.source_agent,
+            &req.source_session_id,
+            &root,
+            &reference,
+            active,
+        )
+        .map(|mut t| {
+            clean_user_markup(&mut t.body);
+            t
+        })
+    };
+    let full = read(false)?;
+    let mut carried = read(true)?;
     fit_context(&mut carried)?;
     let carried_len = carried
         .body
@@ -539,6 +662,7 @@ fn history(req: &HistoryRequest) -> Result<Value, String> {
         })
         .count();
     let earlier = full.body.len().saturating_sub(carried_len);
+    let end = req.before.map_or(earlier, |before| before.min(earlier));
     let mut results = BTreeMap::new();
     for message in &full.body[..earlier] {
         for block in &message.content {
@@ -559,47 +683,31 @@ fn history(req: &HistoryRequest) -> Result<Value, String> {
             }
         }
     }
-    let mut messages = Vec::new();
-    for message in &full.body[..earlier] {
-        let mut blocks = Vec::new();
-        for block in &message.content {
-            match block {
-                Block::Text { text } if !text.trim().is_empty() => {
-                    blocks.push(json!({"type":"text","text":clip(text, HISTORY_TEXT_BYTES)}));
-                }
-                Block::Thinking { text, .. } if !text.trim().is_empty() => {
-                    blocks.push(json!({"type":"thinking","text":clip(text, HISTORY_TEXT_BYTES)}));
-                }
-                Block::ToolUse { id, tool } => {
-                    let (name, input) = tool_summary(tool);
-                    let (output, is_error) = results.get(id).cloned().unwrap_or_default();
-                    blocks.push(json!({"type":"tool","id":id,"name":name,"input":input,"output":output,"isError":is_error}));
-                }
-                _ => {}
-            }
-        }
-        if !blocks.is_empty() {
-            messages.push(json!({
-                "role": if message.role == Role::User { "user" } else { "assistant" },
-                "timestampMs": message.timestamp.timestamp_millis(),
-                "blocks": blocks,
-            }));
-        }
-    }
+    let mut page = Vec::new();
     let mut size = 0;
-    let mut start = messages.len();
+    let mut start = end;
     while start > 0 {
-        let next = messages[start - 1].to_string().len();
-        if size + next > HISTORY_OUTPUT_BYTES {
+        let Some(message) = history_message(start - 1, &full.body[start - 1], &results) else {
+            start -= 1;
+            continue;
+        };
+        let next = message.to_string().len();
+        if !page.is_empty() && size + next > HISTORY_PAGE_BYTES {
             break;
         }
         size += next;
+        page.push(message);
         start -= 1;
     }
-    let truncated = start > 0;
-    Ok(
-        json!({"protocolVersion":1,"engineVersion":ENGINE,"truncated":truncated,"messages":messages.split_off(start)}),
-    )
+    page.reverse();
+    let next_before = (start > 0).then_some(start);
+    Ok(json!({
+        "protocolVersion": 1,
+        "engineVersion": ENGINE,
+        "truncated": next_before.is_some(),
+        "nextBefore": next_before,
+        "messages": page,
+    }))
 }
 
 fn run() -> Result<(), String> {
@@ -641,6 +749,45 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drops_agent_markup_and_unwraps_attachment_prompts() {
+        let at = chrono::Utc::now();
+        let user = |content: Vec<Block>| Message {
+            role: Role::User,
+            content,
+            timestamp: at,
+            model: None,
+            stop_reason: None,
+            usage: None,
+        };
+        let text = |t: &str| Block::Text { text: t.into() };
+        let image = Block::Image {
+            source: txcript::common::ImageSource {
+                source_type: "base64".into(),
+                media_type: "image/png".into(),
+                data: "UE5H".into(),
+            },
+        };
+        let mut messages = vec![
+            user(vec![text(
+                "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>",
+            )]),
+            user(vec![
+                text(
+                    "\n# Files mentioned by the user:\n\n## a.png: /tmp/a.png\nImage attachment: true\n\n## My request:\nwhat is this?",
+                ),
+                text("<image name=[Image #1] path=\"/tmp/a.png\">"),
+                image.clone(),
+                text("</image>"),
+            ]),
+            user(vec![text("keep <b>this</b>")]),
+        ];
+        clean_user_markup(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, vec![text("what is this?"), image]);
+        assert_eq!(messages[1].content, vec![text("keep <b>this</b>")]);
+    }
+
     use super::*;
     use txcript::common::{Role, Tool};
     #[test]
