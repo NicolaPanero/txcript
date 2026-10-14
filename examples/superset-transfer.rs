@@ -15,8 +15,11 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.17";
+const ENGINE: &str = "0.14.4-fork.18";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
+/// A long session's file keeps every compacted window; only the last one is
+/// carried, and `MAX_SOURCE` bounds that.
+const MAX_SOURCE_FILE: u64 = 1024 * 1024 * 1024;
 /// About 140k tokens of JSON: what a target agent can take in one prompt and
 /// still compact.
 const MAX_CONTEXT_BYTES: usize = 480_000;
@@ -94,14 +97,14 @@ fn read_agent(
 
 fn validate_jsonl(path: &Path) -> Result<(), String> {
     let file = std::fs::File::open(path).map_err(|_| "source_unreadable")?;
-    if file.metadata().map_err(|_| "source_unreadable")?.len() > MAX_SOURCE {
+    if file.metadata().map_err(|_| "source_unreadable")?.len() > MAX_SOURCE_FILE {
         return Err("source_too_large".into());
     }
     let mut bytes = Vec::new();
-    file.take(MAX_SOURCE + 1)
+    file.take(MAX_SOURCE_FILE + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "source_unreadable")?;
-    if bytes.len() as u64 > MAX_SOURCE {
+    if bytes.len() as u64 > MAX_SOURCE_FILE {
         return Err("source_too_large".into());
     }
     if std::str::from_utf8(&bytes)
