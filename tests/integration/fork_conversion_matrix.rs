@@ -3,7 +3,8 @@
 use serde_json::json;
 use txcript::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput};
 use txcript::harness::{
-    claude_code::ClaudeCode, codex::Codex, cursor::Cursor, grok::Grok, opencode::OpenCode,
+    antigravity::Antigravity, claude_code::ClaudeCode, codex::Codex, cursor::Cursor, grok::Grok,
+    opencode::OpenCode,
 };
 use txcript::{Codec, Common, TextCodec, Transcript};
 
@@ -19,6 +20,7 @@ fn convert(agent: &str, common: &Transcript<Common>) -> Transcript<Common> {
         "cursor" => codec::<Cursor>(common),
         "grok" => codec::<Grok>(common),
         "opencode" => codec::<OpenCode>(common),
+        "antigravity" => codec::<Antigravity>(common),
         _ => panic!("unknown fixture agent"),
     }
 }
@@ -182,10 +184,24 @@ fn content_signature(common: &Transcript<Common>) -> Vec<String> {
 #[test]
 fn every_supported_direction_preserves_roles_tools_errors_images_and_json() {
     let expected = content_signature(&sample());
-    for source in ["claude", "codex", "cursor", "grok", "opencode"] {
+    for source in [
+        "claude",
+        "codex",
+        "cursor",
+        "grok",
+        "opencode",
+        "antigravity",
+    ] {
         let parsed = convert(source, &sample());
         assert_eq!(content_signature(&parsed), expected, "source {source}");
-        for target in ["claude", "codex", "cursor", "grok", "opencode"] {
+        for target in [
+            "claude",
+            "codex",
+            "cursor",
+            "grok",
+            "opencode",
+            "antigravity",
+        ] {
             let output = convert(target, &parsed);
             assert_eq!(content_signature(&output), expected, "{source} -> {target}");
         }
@@ -204,10 +220,24 @@ fn user_authored_context_tag_examples_are_not_injected_environment() {
         0,
     )];
     let expected = content_signature(&common);
-    for source in ["claude", "codex", "cursor", "grok", "opencode"] {
+    for source in [
+        "claude",
+        "codex",
+        "cursor",
+        "grok",
+        "opencode",
+        "antigravity",
+    ] {
         let parsed = convert(source, &common);
         assert_eq!(content_signature(&parsed), expected, "source {source}");
-        for target in ["claude", "codex", "cursor", "grok", "opencode"] {
+        for target in [
+            "claude",
+            "codex",
+            "cursor",
+            "grok",
+            "opencode",
+            "antigravity",
+        ] {
             assert_eq!(
                 content_signature(&convert(target, &parsed)),
                 expected,

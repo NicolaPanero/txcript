@@ -35,6 +35,8 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
       - uses: dtolnay/rust-toolchain@1.96
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -53,6 +55,8 @@ jobs:
           test "$engine" = "$version"
       - name: Test codecs and conversion helper
         run: |
+          cargo fmt --all --check
+          cargo clippy --locked -p txcript --no-default-features --features opencode --all-targets -- -D warnings
           cargo test --locked -p txcript --no-default-features --features opencode
           cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode
       - name: Build native tools

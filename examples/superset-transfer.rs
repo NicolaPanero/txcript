@@ -11,7 +11,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.14";
+const ENGINE: &str = "0.14.4-fork.15";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 const ADAPTERS: [&str; 5] = ["claude_code", "codex", "cursor", "grok", "opencode"];
 
@@ -208,6 +208,47 @@ fn caller_reference(
     }
 }
 
+fn conversion_warnings(target: HarnessId, messages: &[Message]) -> Vec<&'static str> {
+    let mut warnings =
+        vec!["Runtime permissions, MCP configuration and credentials are not transferred."];
+    if matches!(target, HarnessId::ClaudeCode | HarnessId::OpenCode)
+        && messages.iter().flat_map(|m| &m.content).any(|b| {
+            matches!(
+                b,
+                Block::ToolResult {
+                    content: ToolOutput::Json(_),
+                    ..
+                }
+            )
+        })
+    {
+        warnings.push("Structured tool output is preserved as JSON text for this target.");
+    }
+    if messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .any(|b| matches!(b, Block::Thinking { .. }))
+    {
+        warnings.push(
+            "Provider-specific reasoning signatures and encrypted reasoning are not portable.",
+        );
+    }
+    if target == HarnessId::Cursor
+        && messages.iter().flat_map(|m| &m.content).any(|block| {
+            matches!(
+                block,
+                Block::ToolUse {
+                    tool: txcript::common::Tool::Raw { .. } | txcript::common::Tool::Command { .. },
+                    ..
+                }
+            )
+        })
+    {
+        warnings.push("Foreign tools are shown as recorded imported calls; their original arguments and results are retained. No tools or MCP servers are configured or executed by conversion.");
+    }
+    warnings
+}
+
 fn convert(req: &Request) -> Result<Value, String> {
     let (cwd, mut common) = validated_source(req)?;
     let target = target_harness(&req.target_agent)?;
@@ -229,31 +270,7 @@ fn convert(req: &Request) -> Result<Value, String> {
             return Err("target_store_mismatch".into());
         }
     }
-    let mut warnings =
-        vec!["Runtime permissions, MCP configuration and credentials are not transferred."];
-    if matches!(target, HarnessId::ClaudeCode | HarnessId::OpenCode)
-        && common.body.iter().flat_map(|m| &m.content).any(|b| {
-            matches!(
-                b,
-                Block::ToolResult {
-                    content: ToolOutput::Json(_),
-                    ..
-                }
-            )
-        })
-    {
-        warnings.push("Structured tool output is preserved as JSON text for this target.");
-    }
-    if common
-        .body
-        .iter()
-        .flat_map(|m| &m.content)
-        .any(|b| matches!(b, Block::Thinking { .. }))
-    {
-        warnings.push(
-            "Provider-specific reasoning signatures and encrypted reasoning are not portable.",
-        );
-    }
+    let mut warnings = conversion_warnings(target, &common.body);
     common.meta.id = if target == HarnessId::Codex {
         uuid::Uuid::now_v7()
     } else {
@@ -356,6 +373,35 @@ fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use txcript::common::{Role, Tool};
+    #[test]
+    fn cursor_foreign_tool_replay_is_explained_without_claiming_configured_tools() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolUse {
+                id: "fixture".into(),
+                tool: Tool::Raw {
+                    tool_name: "mcp__fixture__lookup".into(),
+                    input: json!({"query":"fixture"}),
+                },
+            }],
+            timestamp: Utc::now(),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        }];
+        let cursor = conversion_warnings(HarnessId::Cursor, &messages);
+        assert!(
+            cursor
+                .iter()
+                .any(|warning| warning.contains("recorded imported calls"))
+        );
+        let codex = conversion_warnings(HarnessId::Codex, &messages);
+        assert!(
+            !codex
+                .iter()
+                .any(|warning| warning.contains("recorded imported calls"))
+        );
+    }
     #[test]
     fn maps_verified_target_to_callers_path_spelling_without_allowing_escape() {
         let actual = PathBuf::from("actual");

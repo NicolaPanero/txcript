@@ -922,14 +922,98 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
                 cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
             ))
         }
-        // Raw tools and user commands have no Cursor-native proto shape.
-        Tool::Raw { .. } | Tool::Command { .. } => None,
+        // Cursor's MCP container can replay foreign tools without executing
+        // them. Mark the provider as imported history rather than inventing
+        // a configured MCP server, while retaining the source call and output.
+        Tool::Raw { .. } | Tool::Command { .. } => {
+            Some((15, cursor_imported_tool_call_proto(call)))
+        }
     }?;
 
     let mut out = Vec::new();
     pb_len(&mut out, field, &tool_data);
     pb_string(&mut out, 57, &call.id);
     Some(out)
+}
+
+// Field numbers verified against Cursor CLI 2026.10.01's agent.v1
+// McpToolCall / McpArgs / McpSuccess / McpTextContent descriptors.
+// This is a historical replay carrier, never a request to invoke a tool.
+fn cursor_imported_tool_call_proto(call: &CursorStateToolCall) -> Vec<u8> {
+    let (name, input) = call.tool.to_canonical();
+    let input = match input {
+        Value::Object(object) => object,
+        other => Map::from_iter([(String::from("input"), other)]),
+    };
+    let mut args = Vec::new();
+    pb_string(&mut args, 1, &name);
+    for (key, value) in &input {
+        let mut entry = Vec::new();
+        pb_string(&mut entry, 1, key);
+        pb_len(&mut entry, 2, &cursor_json_value_proto(value));
+        pb_len(&mut args, 2, &entry);
+    }
+    pb_string(&mut args, 3, &call.id);
+    pb_string(&mut args, 4, "Imported history");
+    pb_string(&mut args, 5, &name);
+    let mut tool = Vec::new();
+    pb_len(&mut tool, 1, &args);
+    if let Some(result) = &call.result {
+        let mut outcome = Vec::new();
+        let mut payload = Vec::new();
+        if result.is_error {
+            pb_string(&mut payload, 1, &tool_output_text(&result.content));
+            pb_len(&mut outcome, 2, &payload);
+        } else {
+            let mut text = Vec::new();
+            // Empty text still needs a text-content variant on the wire.
+            pb_len(&mut text, 1, tool_output_text(&result.content).as_bytes());
+            let mut content = Vec::new();
+            pb_len(&mut content, 1, &text);
+            pb_len(&mut payload, 1, &content);
+            pb_len(&mut outcome, 1, &payload);
+        }
+        pb_len(&mut tool, 2, &outcome);
+    }
+    pb_string(&mut tool, 3, "Recorded tool call from imported history");
+    tool
+}
+
+// google.protobuf.Value: retain nested objects/lists and scalar types in
+// Cursor's argument map. The authoritative model transcript keeps exact JSON.
+fn cursor_json_value_proto(value: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    match value {
+        Value::Null => pb_varint_field(&mut out, 1, 0),
+        Value::Bool(value) => pb_bool_field(&mut out, 4, *value),
+        Value::Number(value) => {
+            if let Some(number) = value.as_f64() {
+                pb_key(&mut out, 2, 1);
+                out.extend(number.to_le_bytes());
+            } else {
+                pb_string(&mut out, 3, &value.to_string());
+            }
+        }
+        Value::String(value) => pb_len(&mut out, 3, value.as_bytes()),
+        Value::Array(values) => {
+            let mut list = Vec::new();
+            for value in values {
+                pb_len(&mut list, 1, &cursor_json_value_proto(value));
+            }
+            pb_len(&mut out, 6, &list);
+        }
+        Value::Object(values) => {
+            let mut object = Vec::new();
+            for (key, value) in values {
+                let mut entry = Vec::new();
+                pb_string(&mut entry, 1, key);
+                pb_len(&mut entry, 2, &cursor_json_value_proto(value));
+                pb_len(&mut object, 1, &entry);
+            }
+            pb_len(&mut out, 5, &object);
+        }
+    }
+    out
 }
 
 fn cursor_shell_tool_call_proto(
@@ -1815,7 +1899,9 @@ fn normalize_cursor_args(tool: &str, args: Value) -> Value {
             obj.into_iter()
                 .map(|(k, v)| {
                     let key = match (tool, k.as_str()) {
-                        (_, "path" | "filePath") => "file_path",
+                        ("Read" | "Write" | "Edit" | "MultiEdit", "path" | "filePath") => {
+                            "file_path"
+                        }
                         ("Bash", "cwd") => "workdir",
                         ("Edit", "oldString") => "old_string",
                         ("Edit", "newString") => "new_string",
@@ -1849,7 +1935,7 @@ fn denormalize_cursor_args(tool: &str, input: Value) -> Value {
             obj.into_iter()
                 .map(|(k, v)| {
                     let key = match (tool, k.as_str()) {
-                        (_, "file_path") => "path",
+                        ("Read" | "Write" | "Edit" | "MultiEdit", "file_path") => "path",
                         ("Bash", "workdir") => "cwd",
                         ("Edit", "old_string") => "oldString",
                         ("Edit", "new_string") => "newString",

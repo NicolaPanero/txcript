@@ -273,6 +273,182 @@ fn from_common_writes_cursor_resume_state_turns() {
     );
 }
 
+// Grok -> Cursor must preserve both the model transcript and the native
+// replay graph: checking Common alone misses tools rendered as assistant text.
+#[test]
+fn grok_cursor_keeps_consecutive_user_turns_in_both_histories() {
+    use txcript::harness::grok::Grok;
+    for prompts in [
+        ["first", "second"],
+        ["same", "same"],
+        ["日本語", "second\nline"],
+    ] {
+        let mut source = sample_common();
+        source.body = prompts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| common::Message {
+                role: common::Role::User,
+                content: vec![common::Block::Text {
+                    text: (*text).into(),
+                }],
+                timestamp: source.meta.timestamp
+                    + chrono::Duration::seconds(i64::try_from(index).unwrap()),
+                model: None,
+                stop_reason: None,
+                usage: None,
+            })
+            .collect();
+        let grok = Grok::from_common(&source).unwrap();
+        let cursor = txcript::convert::<Grok, cursor::Cursor>(&grok).unwrap();
+        let common = cursor::Cursor::to_common(&cursor).unwrap();
+        assert_eq!(common.body.len(), 2);
+        assert_eq!(common.body[0].content, source.body[0].content);
+        assert_eq!(common.body[1].content, source.body[1].content);
+        let root = latest_root_blob(&cursor.body);
+        let turns = len_fields(&root.data, 8);
+        assert_eq!(
+            turns.len(),
+            2,
+            "native replay must have two distinct user turns"
+        );
+        assert_ne!(
+            turns[0], turns[1],
+            "identical prompts are separate occurrences"
+        );
+    }
+}
+
+#[test]
+fn grok_cursor_raw_tools_replay_as_tools_with_paired_results() {
+    use txcript::harness::grok::Grok;
+    for (name, input) in [
+        ("Glob", json!({"pattern":"**/*.rs","path":"/repo"})),
+        (
+            "mcp__search__query",
+            json!({"q":"日本語","flags":[true,null],"options":{"limit":2}}),
+        ),
+        (
+            "functions.exec",
+            json!("text(await tools.exec_command({cmd:'pwd'}));"),
+        ),
+        (
+            "Bash",
+            json!({"command":"pwd","unexpected_native_field":true}),
+        ),
+    ] {
+        for is_error in [false, true] {
+            let mut source = sample_common();
+            source.body[1].content = vec![common::Block::ToolUse {
+                id: "tool-1".into(),
+                tool: common::Tool::Raw {
+                    tool_name: name.into(),
+                    input: input.clone(),
+                },
+            }];
+            source.body[2].content = vec![common::Block::ToolResult {
+                tool_use_id: "tool-1".into(),
+                content: common::ToolOutput::Text("historical output".into()),
+                is_error,
+            }];
+            let grok = Grok::from_common(&source).unwrap();
+            let canonical_source = Grok::to_common(&grok).unwrap();
+            let cursor = txcript::convert::<Grok, cursor::Cursor>(&grok).unwrap();
+            let restored = cursor::Cursor::to_common(&cursor).unwrap();
+            assert_eq!(restored.body[1].content, canonical_source.body[1].content);
+            assert_eq!(restored.body[2].content, canonical_source.body[2].content);
+            let call = first_tool_call(&cursor.body)
+                .unwrap_or_else(|| panic!("{name}: native replay lost the tool call"));
+            assert_eq!(string_fields(&call, 57), ["tool-1"]);
+            let imported = len_fields(&call, 15);
+            assert_eq!(
+                imported.len(),
+                1,
+                "unknown tools use the imported-tool replay container"
+            );
+            let args = len_fields(&imported[0], 1);
+            assert_eq!(string_fields(&args[0], 1), [name]);
+            assert_eq!(string_fields(&args[0], 3), ["tool-1"]);
+            assert_eq!(string_fields(&args[0], 4), ["Imported history"]);
+            let expected_args = match &input {
+                serde_json::Value::Object(object) => object.clone(),
+                other => serde_json::Map::from_iter([(String::from("input"), other.clone())]),
+            };
+            assert_eq!(native_json_map(&args[0], 2), expected_args);
+            let results = len_fields(&imported[0], 2);
+            assert_eq!(results.len(), 1, "the recorded result stays with the call");
+            let outcome = len_fields(&results[0], if is_error { 2 } else { 1 });
+            assert_eq!(outcome.len(), 1);
+            if is_error {
+                assert_eq!(string_fields(&outcome[0], 1), ["historical output"]);
+            } else {
+                let content = len_fields(&outcome[0], 1);
+                let text = len_fields(&content[0], 1);
+                assert_eq!(string_fields(&text[0], 1), ["historical output"]);
+            }
+            // Optional independent validation against the installed Cursor
+            // protobuf decoder; only synthetic fixtures are exported.
+            if let Ok(directory) = std::env::var("TXCRIPT_CURSOR_NATIVE_FIXTURES") {
+                let directory = std::path::Path::new(&directory);
+                std::fs::create_dir_all(directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{}-{is_error}.json", name.replace(['/', ':'], "_"))),
+                    cursor::Cursor::to_text(&cursor).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+// Independent reader for the standard google.protobuf.Value wire format;
+// graph assertions must check replay arguments, not only the JSON model log.
+fn native_json_map(data: &[u8], field: u64) -> serde_json::Map<String, serde_json::Value> {
+    len_fields(data, field)
+        .iter()
+        .map(|entry| {
+            let key = string_fields(entry, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            let value = len_fields(entry, 2);
+            assert_eq!(value.len(), 1);
+            (key, native_json_value(&value[0]))
+        })
+        .collect()
+}
+
+fn native_json_value(data: &[u8]) -> serde_json::Value {
+    if !varint_fields(data, 1).is_empty() {
+        return serde_json::Value::Null;
+    }
+    if let Some(value) = varint_fields(data, 4).first() {
+        return json!(*value != 0);
+    }
+    if data.first() == Some(&17) {
+        assert_eq!(data.len(), 9);
+        let number = f64::from_le_bytes(data[1..].try_into().unwrap());
+        // Protobuf numbers are doubles; integral doubles and JSON integers
+        // represent the same argument value in Cursor's JavaScript runtime.
+        return serde_json::from_str(&number.to_string()).unwrap();
+    }
+    if let Some(value) = string_fields(data, 3).first() {
+        return json!(value);
+    }
+    if let Some(object) = len_fields(data, 5).first() {
+        return json!(native_json_map(object, 1));
+    }
+    if let Some(list) = len_fields(data, 6).first() {
+        return json!(
+            len_fields(list, 1)
+                .iter()
+                .map(|value| native_json_value(value))
+                .collect::<Vec<_>>()
+        );
+    }
+    panic!("missing protobuf Value variant");
+}
+
 #[test]
 fn from_common_writes_cursor_shell_tool_calls() {
     let mut common = sample_common();

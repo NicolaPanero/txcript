@@ -181,6 +181,13 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
 
     for record in records {
         let (role, entry) = match record {
+            // Compaction summaries use a user envelope for the Claude API,
+            // but are generated context, not a prompt the human authored.
+            Record::User(e)
+                if e.extra.get("isCompactSummary").and_then(Value::as_bool) == Some(true) =>
+            {
+                (Role::Assistant, e)
+            }
             Record::User(e) => (Role::User, e),
             Record::Assistant(e) => (Role::Assistant, e),
             // Newer CLI versions write the same command envelopes on

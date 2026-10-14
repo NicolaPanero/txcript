@@ -92,8 +92,12 @@ A synthetic assistant blob, shaped like the real thing:
   an observed session are non-JSON graph state. On native load txcript keeps
   every blob byte-for-byte, so a same-harness round-trip is lossless. Coming
   *from* Common, the graph must be synthesized: txcript hand-encodes protobuf
-  for shell, read, and edit/write tool steps; other tools degrade to
-  plain-text steps. The result resumes in `cursor-agent`, but the graph is an
+  for shell, read, and edit/write tool steps; foreign tools use Cursor's MCP
+  replay container labelled **Imported history**, retaining their call id,
+  original arguments, recorded output, and success/error state. This is a
+  display carrier for historical calls, not a configured MCP server and not
+  an instruction to execute the call again. The model transcript retains the
+  original tool names and inputs. The result resumes in `cursor-agent`, but the graph is an
   approximation, not what Cursor itself would have written.
 - Conversion to Common is lossy by design: system-prompt blobs, unknown roles,
   editor-injected context, and all graph blobs carry no `Message`.
@@ -107,6 +111,9 @@ A synthetic assistant blob, shaped like the real thing:
 - Observations are from `cursor-agent` 2026.06.26 on macOS, sessions with
   `meta.json` `schemaVersion: 1`. The blob shapes (Vercel-AI-SDK-style
   `tool-call` / `tool-result` types) may drift with CLI releases.
+  Imported-tool replay encodings were also decoded with the protobuf
+  implementation bundled in Cursor CLI 2026.10.01-e373342, using synthetic
+  histories without starting an agent, authenticating, or calling a model.
 
 ## References
 
