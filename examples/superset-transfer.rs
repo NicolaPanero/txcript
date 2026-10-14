@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.19";
+const ENGINE: &str = "0.14.4-fork.20";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// A long session's file keeps every compacted window; only the last one is
 /// carried, and `MAX_SOURCE` bounds that.
@@ -540,11 +540,11 @@ struct HistoryRequest {
 
 const HISTORY_TEXT_BYTES: usize = 20_000;
 const HISTORY_TOOL_BYTES: usize = 2_000;
-/// Below the host's 1 MiB cap on helper output, images included.
-const HISTORY_PAGE_BYTES: usize = 700_000;
+/// Below the host's 16 MiB cap on history output, images included.
+const HISTORY_PAGE_BYTES: usize = 6_000_000;
 /// Image data sent per message; images past it are listed but not sent, so
 /// one message cannot fill a page alone.
-const HISTORY_IMAGE_BYTES: usize = 600_000;
+const HISTORY_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 fn clip(text: &str, max: usize) -> String {
     if text.len() <= max {
