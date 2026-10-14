@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.16";
+const ENGINE: &str = "0.14.4-fork.17";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// About 140k tokens of JSON: what a target agent can take in one prompt and
 /// still compact.
@@ -452,6 +452,7 @@ fn convert(req: &Request) -> Result<Value, String> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(clippy::struct_field_names)]
 struct HistoryRequest {
     source_agent: String,
     source_session_id: String,
