@@ -49,20 +49,43 @@ where
 }
 
 fn read_source(req: &Request, root: &Path, reference: &Path) -> Result<Transcript<Common>, String> {
-    match req.source_agent.as_str() {
+    read_agent(
+        &req.source_agent,
+        &req.source_session_id,
+        root,
+        reference,
+        true,
+    )
+}
+
+/// `active` keeps only what the agent still had after its last compaction.
+fn read_agent(
+    agent: &str,
+    session_id: &str,
+    root: &Path,
+    reference: &Path,
+    active: bool,
+) -> Result<Transcript<Common>, String> {
+    match agent {
         "claude_code" => read(&ClaudeStore::new(root), &reference.to_path_buf(), |t| {
-            t.body = claude_code::active_context(&t.body);
+            if active {
+                t.body = claude_code::active_context(&t.body);
+            }
         }),
         "codex" => read(&CodexStore::new(root), &reference.to_path_buf(), |t| {
-            t.body = codex::active_context(&t.body);
+            if active {
+                t.body = codex::active_context(&t.body);
+            }
         }),
         "cursor" => read(&CursorStore::new(root), &reference.to_path_buf(), |_| {}),
         "grok" => read(&GrokStore::new(root), &reference.to_path_buf(), |_| {}),
         "opencode" => read(
             &OpenCodeStore::new(reference),
-            &req.source_session_id,
+            &session_id.to_string(),
             |t| {
-                t.body = opencode::active_context(&t.body);
+                if active {
+                    t.body = opencode::active_context(&t.body);
+                }
             },
         ),
         _ => Err("source_not_verified".into()),
@@ -427,6 +450,154 @@ fn convert(req: &Request) -> Result<Value, String> {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HistoryRequest {
+    source_agent: String,
+    source_session_id: String,
+    source_root: PathBuf,
+    source_reference: PathBuf,
+}
+
+const HISTORY_TEXT_BYTES: usize = 20_000;
+const HISTORY_TOOL_BYTES: usize = 2_000;
+const HISTORY_OUTPUT_BYTES: usize = 800_000;
+
+fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn tool_summary(tool: &txcript::common::Tool) -> (String, String) {
+    let value = serde_json::to_value(tool).unwrap_or(Value::Null);
+    let name = match value.get("name").and_then(Value::as_str) {
+        Some("Raw") => value
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("Tool"),
+        Some(name) => name,
+        None => "Tool",
+    }
+    .to_string();
+    let detail = ["command", "file_path"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map_or_else(
+            || {
+                let input = value.get("input").unwrap_or(&value);
+                clip(&input.to_string(), HISTORY_TOOL_BYTES)
+            },
+            |text| clip(text, HISTORY_TOOL_BYTES),
+        );
+    (name, detail)
+}
+
+/// The messages that came before what a transfer carries, shaped for display:
+/// text, reasoning and tool calls with their results paired.
+fn history(req: &HistoryRequest) -> Result<Value, String> {
+    let root = req
+        .source_root
+        .canonicalize()
+        .map_err(|_| "source_root_unavailable")?;
+    let reference = req
+        .source_reference
+        .canonicalize()
+        .map_err(|_| "source_unavailable")?;
+    if !reference.starts_with(&root) {
+        return Err("source_outside_store".into());
+    }
+    let full = read_agent(
+        &req.source_agent,
+        &req.source_session_id,
+        &root,
+        &reference,
+        false,
+    )?;
+    let mut carried = read_agent(
+        &req.source_agent,
+        &req.source_session_id,
+        &root,
+        &reference,
+        true,
+    )?;
+    fit_context(&mut carried)?;
+    let carried_len = carried
+        .body
+        .iter()
+        .filter(|m| {
+            !matches!(m.content.first(), Some(Block::Text { text }) if text.starts_with("Earlier parts of this conversation"))
+        })
+        .count();
+    let earlier = full.body.len().saturating_sub(carried_len);
+    let mut results = BTreeMap::new();
+    for message in &full.body[..earlier] {
+        for block in &message.content {
+            if let Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            {
+                let text = match content {
+                    ToolOutput::Text(text) => text.clone(),
+                    ToolOutput::Json(value) => value.to_string(),
+                };
+                results.insert(
+                    tool_use_id.clone(),
+                    (clip(&text, HISTORY_TOOL_BYTES), *is_error),
+                );
+            }
+        }
+    }
+    let mut messages = Vec::new();
+    for message in &full.body[..earlier] {
+        let mut blocks = Vec::new();
+        for block in &message.content {
+            match block {
+                Block::Text { text } if !text.trim().is_empty() => {
+                    blocks.push(json!({"type":"text","text":clip(text, HISTORY_TEXT_BYTES)}));
+                }
+                Block::Thinking { text, .. } if !text.trim().is_empty() => {
+                    blocks.push(json!({"type":"thinking","text":clip(text, HISTORY_TEXT_BYTES)}));
+                }
+                Block::ToolUse { id, tool } => {
+                    let (name, input) = tool_summary(tool);
+                    let (output, is_error) = results.get(id).cloned().unwrap_or_default();
+                    blocks.push(json!({"type":"tool","id":id,"name":name,"input":input,"output":output,"isError":is_error}));
+                }
+                _ => {}
+            }
+        }
+        if !blocks.is_empty() {
+            messages.push(json!({
+                "role": if message.role == Role::User { "user" } else { "assistant" },
+                "timestampMs": message.timestamp.timestamp_millis(),
+                "blocks": blocks,
+            }));
+        }
+    }
+    let mut size = 0;
+    let mut start = messages.len();
+    while start > 0 {
+        let next = messages[start - 1].to_string().len();
+        if size + next > HISTORY_OUTPUT_BYTES {
+            break;
+        }
+        size += next;
+        start -= 1;
+    }
+    let truncated = start > 0;
+    Ok(
+        json!({"protocolVersion":1,"engineVersion":ENGINE,"truncated":truncated,"messages":messages.split_off(start)}),
+    )
+}
+
 fn run() -> Result<(), String> {
     if std::env::args().nth(1).as_deref() == Some("capabilities") {
         println!(
@@ -435,6 +606,7 @@ fn run() -> Result<(), String> {
         );
         return Ok(());
     }
+    let history_mode = std::env::args().nth(1).as_deref() == Some("history");
     let mut input = String::new();
     io::stdin()
         .take(64 * 1024 + 1)
@@ -442,6 +614,11 @@ fn run() -> Result<(), String> {
         .map_err(|_| "input_unreadable")?;
     if input.len() > 64 * 1024 {
         return Err("input_too_large".into());
+    }
+    if history_mode {
+        let request = serde_json::from_str(&input).map_err(|_| "input_invalid")?;
+        println!("{}", history(&request)?);
+        return Ok(());
     }
     let request = serde_json::from_str(&input).map_err(|_| "input_invalid")?;
     println!("{}", convert(&request)?);
