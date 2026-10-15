@@ -44,8 +44,8 @@ tag examples when a Grok export has no display log. `fork.20` adds `history` (th
 the `superset-transfer` helper for Apple Silicon and Windows x64, and publishes them as the
 latest release. Superset++ pins the tested version in
 `scripts/fork/txcript-version.json`; update that pin only after the txcript
-release succeeds. A dispatch requests a Superset build but does not advance
-its pin. Zed no longer participates in this release flow.
+release succeeds. A release never starts a Superset or Zed build: Superset
+builds only when the pin changes on its `fork/main`.
 
 ## Conversion checks
 
