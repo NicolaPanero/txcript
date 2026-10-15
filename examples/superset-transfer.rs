@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.20";
+const ENGINE: &str = "0.14.4-fork.21";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// A long session's file keeps every compacted window; only the last one is
 /// carried, and `MAX_SOURCE` bounds that.
@@ -275,8 +275,8 @@ fn encoded_len(message: &Message) -> usize {
 }
 
 /// Keeps the newest messages that fit `MAX_CONTEXT_BYTES`, never separating a
-/// tool call from its result, and opens with a user turn so every target
-/// accepts it. Returns whether anything was dropped.
+/// tool call from its result. A trimmed conversation beginning with an
+/// assistant turn gets a continuation notice. Returns whether anything was dropped.
 fn fit_context(common: &mut Transcript<Common>) -> Result<bool, String> {
     let sizes: Vec<usize> = common.body.iter().map(encoded_len).collect();
     let mut start = common.body.len();
@@ -296,10 +296,11 @@ fn fit_context(common: &mut Transcript<Common>) -> Result<bool, String> {
         });
         *common = cropped.ok_or("source_conversion_failed")??;
     }
-    if common
-        .body
-        .first()
-        .is_some_and(|m| m.role == Role::Assistant)
+    if trimmed
+        && common
+            .body
+            .first()
+            .is_some_and(|m| m.role == Role::Assistant)
     {
         let timestamp = common.body[0].timestamp;
         common.body.insert(
@@ -749,6 +750,54 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_preface_only_follows_actual_truncation() {
+        let at = Utc::now();
+        let message = |role, text: String| Message {
+            role,
+            content: vec![Block::Text { text }],
+            timestamp: at,
+            model: None,
+            stop_reason: None,
+            usage: None,
+        };
+        let meta = txcript::common::Meta {
+            id: "context-preface".into(),
+            timestamp: at,
+            cwd: None,
+            git_branch: None,
+            title: None,
+            cli_version: None,
+            model: None,
+            lineage: None,
+        };
+        let original = vec![
+            message(Role::Assistant, "Preserved runtime context".into()),
+            message(Role::User, "Actual user prompt".into()),
+        ];
+        let mut complete = Transcript::<Common>::new(meta.clone(), original.clone());
+        assert!(!fit_context(&mut complete).expect("complete context"));
+        assert_eq!(complete.body, original);
+
+        let mut long = Transcript::<Common>::new(
+            meta,
+            vec![
+                message(Role::User, "x".repeat(MAX_CONTEXT_BYTES + 1)),
+                message(Role::Assistant, "Recent response".into()),
+            ],
+        );
+        assert!(fit_context(&mut long).expect("trimmed context"));
+        assert_eq!(long.body.len(), 2);
+        assert_eq!(long.body[0].role, Role::User);
+        assert_eq!(long.body[1].role, Role::Assistant);
+        assert_eq!(
+            long.body[1].content,
+            vec![Block::Text {
+                text: "Recent response".into()
+            }]
+        );
+    }
+
     #[test]
     fn drops_agent_markup_and_unwraps_attachment_prompts() {
         let at = chrono::Utc::now();
