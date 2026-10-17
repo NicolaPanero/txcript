@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.21";
+const ENGINE: &str = "0.14.4-fork.22";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// A long session's file keeps every compacted window; only the last one is
 /// carried, and `MAX_SOURCE` bounds that.
