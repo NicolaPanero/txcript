@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::common::{Block, EditOp, ImageSource, Message, Meta, Role, Tool, ToolOutput};
 use crate::error::{Error, Result};
+use crate::harness::runtime_context::drop_runtime_context;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 #[cfg(feature = "opencode")]
@@ -60,7 +61,7 @@ impl Codec for Cursor {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         Ok(Transcript::new(
             transcript.meta.clone(),
-            db_to_messages(&transcript.body, &transcript.meta)?,
+            drop_runtime_context(db_to_messages(&transcript.body, &transcript.meta)?),
         ))
     }
 
@@ -1860,7 +1861,7 @@ fn workspace_from_message(obj: &Value) -> Option<String> {
 fn is_context_injection(obj: &Value) -> bool {
     content_strings(obj.get("content")).any(|s| {
         let text = s.trim();
-        text.starts_with("<user_info>") && text.ends_with("</user_info>")
+        text.starts_with("<user_info>") && !text.contains("<user_query>")
     })
 }
 

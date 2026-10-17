@@ -23,6 +23,7 @@ use crate::common::{
 };
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
+use crate::harness::runtime_context::drop_runtime_context;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 /// The Claude Code harness marker.
@@ -170,7 +171,10 @@ impl Codec for ClaudeCode {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         Ok(Transcript::new(
             transcript.meta.clone(),
-            records_to_messages(&transcript.body, transcript.meta.timestamp),
+            drop_runtime_context(records_to_messages(
+                &transcript.body,
+                transcript.meta.timestamp,
+            )),
         ))
     }
 

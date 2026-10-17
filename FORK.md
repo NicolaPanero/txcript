@@ -18,6 +18,10 @@ conversations between agents natively:
   exit status, and the AGENTS.md instructions Codex records as a user message
   are not read as a prompt.
 - OpenCode: tool results stay paired with their calls.
+- Every reader that Superset transfers from (Claude Code, Codex, Cursor,
+  Cursor Desktop, Grok, OpenCode) drops the setup blocks, reminders,
+  notifications and timestamps that the agent records as user text, so they
+  do not reach another agent as the user's prompt.
 - `txcript list --json`: the session list as JSON (with `updated_at`), for
   Zed Fork's "Find chat…" and Superset's "Import chat"; `--under DIR`
   (repeatable) filters by folders and `--preview` adds each session's first
@@ -31,7 +35,7 @@ order for Cursor to the library, so the CLI's exports get it too; `fork.5`
 skips Codex's AGENTS.md prelude; `fork.6` publishes releases automatically; `fork.7` adds `list --json`; `fork.8` adds `--under`, `--preview` and
 `updated_at` to it. `fork.9` fixes Grok context attribution, literal tag
 examples and Codex shell errors, and adds the conversion regression matrix. `fork.10` also preserves literal
-tag examples when a Grok export has no display log. `fork.20` adds `history` (the earlier messages of a transferred chat, for display) and transfers only the context a Codex, Claude Code or OpenCode session still had after its last compaction, and keeps any transfer within about 140k tokens.
+tag examples when a Grok export has no display log. `fork.20` adds `history` (the earlier messages of a transferred chat, for display) and transfers only the context a Codex, Claude Code or OpenCode session still had after its last compaction, and keeps any transfer within about 140k tokens. `fork.22` drops runtime context from user turns in every reader.
 
 ## Releasing
 

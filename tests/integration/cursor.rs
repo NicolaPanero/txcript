@@ -652,7 +652,15 @@ fn parses_existing_cursor_message_shapes() {
                 id: "context".into(),
                 data: serde_json::to_vec(&json!({
                     "role": "user",
-                    "content": "<user_info>\nWorkspace Path: /Users/me/repo\n</user_info>"
+                    "content": "<user_info>\nWorkspace Path: /Users/me/repo\n</user_info>\n\n<git_status>\n## main\n</git_status>\n\n<agent_skills>\n</agent_skills>"
+                }))
+                .unwrap(),
+            },
+            cursor::CursorBlob {
+                id: "reminder".into(),
+                data: serde_json::to_vec(&json!({
+                    "role": "user",
+                    "content": "<system-reminder>\nThe following skills are available.\n</system-reminder>"
                 }))
                 .unwrap(),
             },
@@ -707,6 +715,12 @@ fn parses_existing_cursor_message_shapes() {
     );
     let common = cursor::Cursor::to_common(&transcript).unwrap();
     assert_eq!(common.body.len(), 2);
+    assert_eq!(
+        common.body[0].content,
+        vec![common::Block::Text {
+            text: "hello!".into()
+        }]
+    );
     assert!(matches!(
         &common.body[1].content[0],
         common::Block::ToolUse {

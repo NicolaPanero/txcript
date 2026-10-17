@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
 use crate::error::Result;
+use crate::harness::runtime_context::drop_runtime_context;
 use crate::transcript::{Codec, Common, Harness, TextCodec, Transcript};
 
 /// The `OpenCode` harness marker.
@@ -111,7 +112,10 @@ impl Codec for OpenCode {
                 _ => {}
             }
         }
-        Ok(Transcript::new(transcript.meta.clone(), messages))
+        Ok(Transcript::new(
+            transcript.meta.clone(),
+            drop_runtime_context(messages),
+        ))
     }
 
     fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Self>> {

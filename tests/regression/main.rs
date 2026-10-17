@@ -13,6 +13,7 @@ mod codex_structured_output;
 mod generated_summaries;
 mod grok_user_context;
 mod opencode_raw_input;
+mod runtime_context;
 
 use chrono::{DateTime, Utc};
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};

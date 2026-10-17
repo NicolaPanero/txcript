@@ -26,6 +26,7 @@ pub mod pi;
 pub mod simple;
 
 pub(crate) mod jsonl;
+mod runtime_context;
 
 /// Map `items` across the machine's cores, dropping the `None`s and keeping
 /// input order.

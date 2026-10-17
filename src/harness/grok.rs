@@ -45,6 +45,7 @@ use uuid::Uuid;
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput};
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
+use crate::harness::runtime_context::drop_runtime_context;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 #[path = "grok_user_content.rs"]
@@ -243,7 +244,10 @@ impl Codec for Grok {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         Ok(Transcript::new(
             transcript.meta.clone(),
-            body_to_messages(&transcript.body, transcript.meta.timestamp),
+            drop_runtime_context(body_to_messages(
+                &transcript.body,
+                transcript.meta.timestamp,
+            )),
         ))
     }
 
