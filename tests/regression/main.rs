@@ -8,6 +8,9 @@
 
 mod active_context;
 mod claude_tool_result;
+#[cfg(feature = "codex_zstd")]
+mod codex_compressed;
+mod codex_imported_reasoning;
 mod codex_pairing;
 mod codex_structured_output;
 mod generated_summaries;

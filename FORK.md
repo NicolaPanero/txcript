@@ -16,7 +16,11 @@ conversations between agents natively:
   literal tag examples and image-only prompts retain their real input.
 - Codex: structured tool outputs are kept, shell failures retain their native
   exit status, and the AGENTS.md instructions Codex records as a user message
-  are not read as a prompt.
+  are not read as a prompt. Imported reasoning is sent as ordinary assistant
+  commentary, with its block type kept outside the API payload for later
+  conversions. No unsigned OpenAI reasoning item is synthesized. The upstream
+  fix from `a77e553` also lists and reads `.jsonl.zst` rollouts; the Superset
+  helper validates their decoded size before transferring them.
 - OpenCode: tool results stay paired with their calls.
 - Every reader that Superset transfers from (Claude Code, Codex, Cursor,
   Cursor Desktop, Grok, OpenCode) drops the setup blocks, reminders,
@@ -53,10 +57,10 @@ builds only when the pin changes on its `fork/main`.
 
 ## Conversion checks
 
-`cargo test --locked -p txcript --no-default-features --features opencode`
+`cargo test --locked -p txcript --no-default-features --features opencode,codex_zstd`
 runs the library, native format integration tests, regression tests and
 property-based codec checks. `cargo test --locked -p txcript --example
-superset-transfer --no-default-features --features opencode` verifies the
+superset-transfer --no-default-features --features opencode,codex_zstd` verifies the
 conversion helper. These checks run on pushes to `fork` and before releases. Lint and release builds use the declared Rust 1.96 toolchain, matching local
 validation.
 

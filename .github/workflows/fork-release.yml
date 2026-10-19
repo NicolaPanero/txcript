@@ -103,14 +103,14 @@ jobs:
         if: steps.package-cache.outputs.cache-hit != 'true'
         run: |
           cargo fmt --all --check
-          cargo clippy --locked -p txcript --no-default-features --features opencode --all-targets -- -D warnings
-          cargo test --locked -p txcript --no-default-features --features opencode
-          cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode
+          cargo clippy --locked -p txcript --no-default-features --features opencode,codex_zstd --all-targets -- -D warnings
+          cargo test --locked -p txcript --no-default-features --features opencode,codex_zstd
+          cargo test --locked -p txcript --example superset-transfer --no-default-features --features opencode,codex_zstd
       - name: Build native tools
         if: steps.package-cache.outputs.cache-hit != 'true'
         run: |
           cargo build --release --locked -p txcript-cli
-          cargo build --release --locked -p txcript --example superset-transfer --no-default-features --features opencode
+          cargo build --release --locked -p txcript --example superset-transfer --no-default-features --features opencode,codex_zstd
       - name: Package macOS
         if: runner.os == 'macOS' && steps.package-cache.outputs.cache-hit != 'true'
         run: |

@@ -2846,11 +2846,12 @@ dependencies = [
  "wasm-bindgen",
  "wreq",
  "wreq-util",
+ "zstd",
 ]
 
 [[package]]
 name = "txcript-cli"
-version = "0.14.4-fork.22"
+version = "0.14.4-fork.23"
 dependencies = [
  "base64",
  "chrono",

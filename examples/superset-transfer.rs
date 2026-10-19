@@ -15,7 +15,7 @@ use txcript::harness::{
 };
 use txcript::{Codec, Common, CropError, HarnessId, Span, Store, Transcript};
 
-const ENGINE: &str = "0.14.4-fork.22";
+const ENGINE: &str = "0.14.4-fork.23";
 const MAX_SOURCE: u64 = 100 * 1024 * 1024;
 /// A long session's file keeps every compacted window; only the last one is
 /// carried, and `MAX_SOURCE` bounds that.
@@ -96,15 +96,32 @@ fn read_agent(
 }
 
 fn validate_jsonl(path: &Path) -> Result<(), String> {
+    validate_jsonl_with_limit(path, MAX_SOURCE_FILE)
+}
+
+fn validate_jsonl_with_limit(path: &Path, limit: u64) -> Result<(), String> {
     let file = std::fs::File::open(path).map_err(|_| "source_unreadable")?;
-    if file.metadata().map_err(|_| "source_unreadable")?.len() > MAX_SOURCE_FILE {
+    if file.metadata().map_err(|_| "source_unreadable")?.len() > limit {
         return Err("source_too_large".into());
     }
+    let reader: Box<dyn Read> = if path.to_string_lossy().ends_with(".jsonl.zst") {
+        #[cfg(feature = "codex_zstd")]
+        {
+            Box::new(zstd::stream::read::Decoder::new(file).map_err(|_| "source_unreadable")?)
+        }
+        #[cfg(not(feature = "codex_zstd"))]
+        {
+            return Err("source_unreadable".into());
+        }
+    } else {
+        Box::new(file)
+    };
     let mut bytes = Vec::new();
-    file.take(MAX_SOURCE_FILE + 1)
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "source_unreadable")?;
-    if bytes.len() as u64 > MAX_SOURCE_FILE {
+    if bytes.len() as u64 > limit {
         return Err("source_too_large".into());
     }
     if std::str::from_utf8(&bytes)
@@ -750,6 +767,51 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "codex_zstd")]
+    #[test]
+    fn compressed_codex_source_is_validated_and_keeps_its_conversation() {
+        let root = tempfile::tempdir().expect("fixture");
+        let cwd = root.path().canonicalize().expect("cwd");
+        let reference = cwd.join("rollout-compressed.jsonl.zst");
+        let text = [
+            json!({"type":"session_meta","payload":{"id":"compressed","cwd":cwd,"timestamp":"2026-01-02T03:04:05Z"}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep this entire prompt 日本語"}]}}),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let write = |text: &str| {
+            std::fs::write(
+                &reference,
+                zstd::encode_all(text.as_bytes(), 1).expect("compression"),
+            )
+            .expect("compressed fixture");
+        };
+        write(&text);
+        let request = Request {
+            source_agent: "codex".into(),
+            source_session_id: "compressed".into(),
+            source_root: cwd.clone(),
+            source_reference: reference.clone(),
+            target_agent: "claude_code".into(),
+            target_root: cwd.clone(),
+            cwd,
+        };
+        let (_, common) = validated_source(&request).expect("validated source");
+        assert!(
+            matches!(&common.body[0].content[0], Block::Text { text } if text == "Keep this entire prompt 日本語")
+        );
+
+        write("{\"type\":");
+        assert_eq!(validate_jsonl(&reference), Err("source_incomplete".into()));
+        write(&format!("{{\"text\":\"{}\"}}", "x".repeat(2048)));
+        assert_eq!(
+            validate_jsonl_with_limit(&reference, 512),
+            Err("source_too_large".into())
+        );
+    }
+
     #[test]
     fn context_preface_only_follows_actual_truncation() {
         let at = Utc::now();
