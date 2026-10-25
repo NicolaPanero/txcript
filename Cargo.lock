@@ -2851,7 +2851,7 @@ dependencies = [
 
 [[package]]
 name = "txcript-cli"
-version = "0.14.4-fork.23"
+version = "0.14.4-fork.24"
 dependencies = [
  "base64",
  "chrono",
