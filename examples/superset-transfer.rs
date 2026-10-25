@@ -554,6 +554,10 @@ struct HistoryRequest {
     /// transfer's carried context starts.
     #[serde(default)]
     before: Option<usize>,
+    /// Page the whole session, the carried context included. A context
+    /// handoff needs the newest messages, which a transfer already carries.
+    #[serde(default)]
+    all: bool,
 }
 
 const HISTORY_TEXT_BYTES: usize = 20_000;
@@ -670,16 +674,20 @@ fn history(req: &HistoryRequest) -> Result<Value, String> {
         })
     };
     let full = read(false)?;
-    let mut carried = read(true)?;
-    fit_context(&mut carried)?;
-    let carried_len = carried
-        .body
-        .iter()
-        .filter(|m| {
-            !matches!(m.content.first(), Some(Block::Text { text }) if text.starts_with("Earlier parts of this conversation"))
-        })
-        .count();
-    let earlier = full.body.len().saturating_sub(carried_len);
+    let earlier = if req.all {
+        full.body.len()
+    } else {
+        let mut carried = read(true)?;
+        fit_context(&mut carried)?;
+        let carried_len = carried
+            .body
+            .iter()
+            .filter(|m| {
+                !matches!(m.content.first(), Some(Block::Text { text }) if text.starts_with("Earlier parts of this conversation"))
+            })
+            .count();
+        full.body.len().saturating_sub(carried_len)
+    };
     let end = req.before.map_or(earlier, |before| before.min(earlier));
     let mut results = BTreeMap::new();
     for message in &full.body[..earlier] {
