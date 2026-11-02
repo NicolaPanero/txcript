@@ -544,6 +544,22 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
                     .filter_map(|block| serialize_assistant_block(block, &mut tool_names))
                     .collect();
                 if !content.is_empty() {
+                    // Other agents log one line per block, so parallel tool calls
+                    // arrive as consecutive assistant messages. Anthropic's API
+                    // needs every call of a turn in one message, followed by all
+                    // of its results, or it rejects the whole history.
+                    let is_call = |block: Option<&Value>| {
+                        block.is_some_and(|block| block["type"] == "tool-call")
+                    };
+                    if let Some(blocks) = values
+                        .last_mut()
+                        .filter(|last| last["role"] == "assistant")
+                        .and_then(|last| last["content"].as_array_mut())
+                        .filter(|blocks| is_call(blocks.last()) && is_call(content.first()))
+                    {
+                        blocks.extend(content);
+                        continue;
+                    }
                     let mut obj = json!({
                         "role": "assistant",
                         "content": content,

@@ -273,6 +273,80 @@ fn from_common_writes_cursor_resume_state_turns() {
     );
 }
 
+#[test]
+fn consecutive_assistant_lines_become_one_message_so_parallel_calls_stay_together() {
+    let mut source = sample_common();
+    let assistant = |content: Vec<common::Block>, at: &str| common::Message {
+        role: common::Role::Assistant,
+        content,
+        timestamp: ts(at),
+        model: Some("composer-2.5-fast".into()),
+        stop_reason: None,
+        usage: None,
+    };
+    let call = |id: &str| common::Block::ToolUse {
+        id: id.into(),
+        tool: common::Tool::Read {
+            file_path: format!("/repo/{id}.md"),
+            offset: None,
+            limit: None,
+        },
+    };
+    let result = |id: &str| common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: id.into(),
+            content: common::ToolOutput::Text("contents".into()),
+            is_error: false,
+        }],
+        timestamp: ts("2026-01-02T03:04:10.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    };
+    source.body.truncate(1);
+    source.body.extend([
+        assistant(vec![call("a")], "2026-01-02T03:04:07.000Z"),
+        assistant(vec![call("b")], "2026-01-02T03:04:07.500Z"),
+        result("b"),
+        result("a"),
+    ]);
+    let cursor = cursor::Cursor::from_common(&source).unwrap();
+    let messages: Vec<serde_json::Value> = cursor
+        .body
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<serde_json::Value>(&blob.data).ok())
+        .filter(|value| value.get("role").is_some())
+        .collect();
+    let shape: Vec<(String, Vec<String>)> = messages
+        .iter()
+        .map(|message| {
+            (
+                message["role"].as_str().unwrap().to_string(),
+                message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| {
+                        format!(
+                            "{}:{}",
+                            block["type"].as_str().unwrap(),
+                            block["toolCallId"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let assistants: Vec<_> = shape
+        .iter()
+        .filter(|(role, _)| role == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1, "one assistant message: {shape:?}");
+    assert_eq!(assistants[0].1, ["tool-call:a", "tool-call:b"]);
+}
+
 // Grok -> Cursor must preserve both the model transcript and the native
 // replay graph: checking Common alone misses tools rendered as assistant text.
 #[test]
