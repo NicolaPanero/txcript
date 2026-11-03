@@ -9,6 +9,13 @@ conversations between agents natively:
   (without it Cursor's agent rejects the chat), only the active transcript is
   read, literal XML examples are not discarded as environment setup, the `<timestamp>` prefix of CLI queries is dropped, and messages read
   from Cursor keep their order (Cursor stores one time for a whole chat).
+- Cursor, written for Anthropic models: Cursor sends the whole history to the
+  model, and Anthropic rejects it on any gap. The calls of one turn go in one
+  assistant message even when another agent logged a result between them; a
+  result that no assistant call produced (a slash command's output) is user
+  text, held back until the call before it has its result; a slash command is
+  written as typed; and an image is written as `{image, mimeType}`, because the
+  Anthropic `source` shape makes Cursor fail with `undefined.toString()`.
 - Grok: `synthetic_reason` and the display log separate human prompts from
   injected instructions, compaction summaries and automatic continuation.
   Useful runtime context remains explicitly labelled as assistant context,

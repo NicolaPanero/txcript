@@ -349,6 +349,261 @@ fn consecutive_assistant_lines_become_one_message_so_parallel_calls_stay_togethe
 
 // Grok -> Cursor must preserve both the model transcript and the native
 // replay graph: checking Common alone misses tools rendered as assistant text.
+
+#[test]
+fn a_result_written_before_the_turn_ends_does_not_split_its_parallel_calls() {
+    let mut source = sample_common();
+    let assistant = |content: Vec<common::Block>, at: &str| common::Message {
+        role: common::Role::Assistant,
+        content,
+        timestamp: ts(at),
+        model: Some("composer-2.5-fast".into()),
+        stop_reason: None,
+        usage: None,
+    };
+    let call = |id: &str| common::Block::ToolUse {
+        id: id.into(),
+        tool: common::Tool::Read {
+            file_path: format!("/repo/{id}.md"),
+            offset: None,
+            limit: None,
+        },
+    };
+    let result = |id: &str| common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: id.into(),
+            content: common::ToolOutput::Text("contents".into()),
+            is_error: false,
+        }],
+        timestamp: ts("2026-01-02T03:04:10.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    };
+    source.body.truncate(1);
+    source.body.extend([
+        assistant(vec![call("a")], "2026-01-02T03:04:07.000Z"),
+        assistant(vec![call("b")], "2026-01-02T03:04:07.100Z"),
+        result("a"),
+        assistant(vec![call("c")], "2026-01-02T03:04:07.200Z"),
+        result("b"),
+        result("c"),
+        assistant(
+            vec![common::Block::Text {
+                text: "done".into(),
+            }],
+            "2026-01-02T03:04:11.000Z",
+        ),
+    ]);
+    let cursor = cursor::Cursor::from_common(&source).unwrap();
+    let shape: Vec<String> = cursor
+        .body
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<serde_json::Value>(&blob.data).ok())
+        .filter(|value| value.get("role").is_some())
+        .map(|message| {
+            let blocks: Vec<String> = message["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| {
+                    format!(
+                        "{}:{}",
+                        block["type"].as_str().unwrap(),
+                        block["toolCallId"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            format!(
+                "{}[{}]",
+                message["role"].as_str().unwrap(),
+                blocks.join(",")
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape[1..],
+        [
+            "assistant[tool-call:a,tool-call:b,tool-call:c]",
+            "tool[tool-result:a]",
+            "tool[tool-result:b]",
+            "tool[tool-result:c]",
+            "assistant[text:]",
+        ],
+        "{shape:?}"
+    );
+}
+
+#[test]
+fn a_slash_command_and_its_output_are_user_text_not_a_tool_call_with_no_call() {
+    let mut source = sample_common();
+    let user = |content: Vec<common::Block>, at: &str| common::Message {
+        role: common::Role::User,
+        content,
+        timestamp: ts(at),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    };
+    source.body.truncate(1);
+    source.body.extend([
+        user(
+            vec![common::Block::ToolUse {
+                id: "cmd-1".into(),
+                tool: common::Tool::Command {
+                    command: "/model".into(),
+                    args: Some("opus".into()),
+                },
+            }],
+            "2026-01-02T03:04:07.000Z",
+        ),
+        user(
+            vec![common::Block::ToolResult {
+                tool_use_id: "cmd-1".into(),
+                content: common::ToolOutput::Text("Set model to opus".into()),
+                is_error: false,
+            }],
+            "2026-01-02T03:04:08.000Z",
+        ),
+        user(
+            vec![common::Block::Text {
+                text: "go on".into(),
+            }],
+            "2026-01-02T03:04:09.000Z",
+        ),
+    ]);
+    let cursor = cursor::Cursor::from_common(&source).unwrap();
+    let messages: Vec<serde_json::Value> = cursor
+        .body
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<serde_json::Value>(&blob.data).ok())
+        .filter(|value| value.get("role").is_some())
+        .collect();
+    assert!(
+        messages.iter().all(|message| message["role"] != "tool"),
+        "no tool message without a call: {messages:?}"
+    );
+    let text = messages
+        .iter()
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("/model opus"), "{text}");
+    assert!(text.contains("Set model to opus"), "{text}");
+    assert!(!text.contains("Command {"), "{text}");
+}
+
+#[test]
+fn command_output_written_between_a_call_and_its_result_waits_for_the_result() {
+    let mut source = sample_common();
+    let msg = |role: common::Role, content: Vec<common::Block>, at: &str| common::Message {
+        role,
+        content,
+        timestamp: ts(at),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    };
+    source.body.truncate(1);
+    source.body.extend([
+        msg(
+            common::Role::Assistant,
+            vec![common::Block::ToolUse {
+                id: "call-1".into(),
+                tool: common::Tool::Read {
+                    file_path: "/repo/a.md".into(),
+                    offset: None,
+                    limit: None,
+                },
+            }],
+            "2026-01-02T03:04:07.000Z",
+        ),
+        msg(
+            common::Role::User,
+            vec![common::Block::ToolResult {
+                tool_use_id: "local-output".into(),
+                content: common::ToolOutput::Text("typed by the user".into()),
+                is_error: false,
+            }],
+            "2026-01-02T03:04:08.000Z",
+        ),
+        msg(
+            common::Role::User,
+            vec![common::Block::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: common::ToolOutput::Text("contents".into()),
+                is_error: false,
+            }],
+            "2026-01-02T03:04:09.000Z",
+        ),
+        msg(
+            common::Role::Assistant,
+            vec![common::Block::Text {
+                text: "done".into(),
+            }],
+            "2026-01-02T03:04:10.000Z",
+        ),
+    ]);
+    let cursor = cursor::Cursor::from_common(&source).unwrap();
+    let roles: Vec<String> = cursor
+        .body
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<serde_json::Value>(&blob.data).ok())
+        .filter(|value| value.get("role").is_some())
+        .map(|message| message["role"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        roles[1..],
+        ["assistant", "tool", "user", "assistant"],
+        "{roles:?}"
+    );
+}
+
+#[test]
+fn an_image_is_written_the_way_cursor_reads_it_and_read_back_unchanged() {
+    let mut source = sample_common();
+    source.body.truncate(1);
+    source.body[0].content = vec![
+        common::Block::Text {
+            text: "what is this".into(),
+        },
+        common::Block::Image {
+            source: common::ImageSource {
+                source_type: "base64".into(),
+                media_type: "image/png".into(),
+                data: "iVBORw0KGgo=".into(),
+            },
+        },
+    ];
+    let cursor = cursor::Cursor::from_common(&source).unwrap();
+    let image = cursor
+        .body
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<serde_json::Value>(&blob.data).ok())
+        .filter(|value| value["role"] == "user")
+        .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+        .find(|block| block["type"] == "image")
+        .expect("the image is written");
+    assert_eq!(image["image"], "iVBORw0KGgo=");
+    assert_eq!(image["mimeType"], "image/png");
+    assert!(
+        image.get("source").is_none(),
+        "Anthropic's shape breaks Cursor: {image}"
+    );
+    let restored = cursor::Cursor::to_common(&cursor).unwrap();
+    assert!(
+        restored.body[0]
+            .content
+            .contains(&source.body[0].content[1])
+    );
+}
+
 #[test]
 fn grok_cursor_keeps_consecutive_user_turns_in_both_histories() {
     use txcript::harness::grok::Grok;

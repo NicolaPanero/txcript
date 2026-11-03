@@ -493,48 +493,99 @@ fn blob_message(
     })
 }
 
+/// Writes one user-role message: tool results that answer an assistant call
+/// become tool messages, everything else becomes user text. Text that no call
+/// produced (a slash command and its output) waits while a call still has no
+/// result, so it never comes between a call and its answer.
+fn push_user_message(
+    message: &Message,
+    values: &mut Vec<Value>,
+    tool_names: &HashMap<String, String>,
+    pending: &mut HashSet<String>,
+    held: &mut Vec<Value>,
+) {
+    let mut user_blocks = Vec::new();
+    let mut housekeeping = Vec::new();
+    for block in &message.content {
+        match block {
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } if tool_names.contains_key(tool_use_id) => {
+                pending.remove(tool_use_id);
+                let tool_name = tool_names
+                    .get(tool_use_id)
+                    .cloned()
+                    .unwrap_or_else(|| "tool".to_string());
+                values.push(json!({
+                    "role": "tool",
+                    "content": [{
+                        "type": "tool-result",
+                        "toolCallId": tool_use_id,
+                        "toolName": tool_name,
+                        "result": tool_output_text(content),
+                    }],
+                    "createdAt": message.timestamp.timestamp_millis(),
+                    "isError": is_error,
+                }));
+            }
+            // A result no assistant call produced, such as the output of a
+            // slash command, is not a tool message: the provider rejects a
+            // result with no call before it.
+            Block::ToolResult { content, .. } => {
+                let text = tool_output_text(content);
+                if !text.trim().is_empty() {
+                    housekeeping.push(json!({"type": "text", "text": text}));
+                }
+            }
+            Block::ToolUse {
+                tool: Tool::Command { .. },
+                ..
+            } => housekeeping.push(serialize_user_block(block)),
+            other => user_blocks.push(serialize_user_block(other)),
+        }
+    }
+    if pending.is_empty() || !user_blocks.is_empty() {
+        // A real prompt ends the turn even when its calls never got a result.
+        if !user_blocks.is_empty() {
+            pending.clear();
+        }
+        held.extend(housekeeping);
+        held.extend(user_blocks);
+        flush_held(values, held, message);
+    } else {
+        held.extend(housekeeping);
+    }
+}
+
+/// Writes the text held back for a user message, once no call waits for a result.
+fn flush_held(values: &mut Vec<Value>, held: &mut Vec<Value>, message: &Message) {
+    if held.is_empty() {
+        return;
+    }
+    values.push(json!({
+        "role": "user",
+        "content": std::mem::take(held),
+        "createdAt": message.timestamp.timestamp_millis(),
+    }));
+}
+
 fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
     let mut values = Vec::new();
     let mut tool_names = HashMap::new();
+    // The calls of the open assistant turn that have no result yet, and the
+    // message that holds them.
+    let mut pending: HashSet<String> = HashSet::new();
+    let mut group: Option<usize> = None;
+    let mut held: Vec<Value> = Vec::new();
 
     for message in messages {
         match message.role {
             Role::User => {
-                let mut user_blocks = Vec::new();
-                for block in &message.content {
-                    match block {
-                        Block::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                        } => {
-                            let tool_name = tool_names
-                                .get(tool_use_id)
-                                .cloned()
-                                .unwrap_or_else(|| "tool".to_string());
-                            values.push(json!({
-                                "role": "tool",
-                                "content": [{
-                                    "type": "tool-result",
-                                    "toolCallId": tool_use_id,
-                                    "toolName": tool_name,
-                                    "result": tool_output_text(content),
-                                }],
-                                "createdAt": message.timestamp.timestamp_millis(),
-                                "isError": is_error,
-                            }));
-                        }
-                        other => {
-                            user_blocks.push(serialize_user_block(other));
-                        }
-                    }
-                }
-                if !user_blocks.is_empty() {
-                    values.push(json!({
-                        "role": "user",
-                        "content": user_blocks,
-                        "createdAt": message.timestamp.timestamp_millis(),
-                    }));
+                push_user_message(message, &mut values, &tool_names, &mut pending, &mut held);
+                if pending.is_empty() {
+                    flush_held(&mut values, &mut held, message);
                 }
             }
             Role::Assistant => {
@@ -544,22 +595,27 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
                     .filter_map(|block| serialize_assistant_block(block, &mut tool_names))
                     .collect();
                 if !content.is_empty() {
-                    // Other agents log one line per block, so parallel tool calls
-                    // arrive as consecutive assistant messages. Anthropic's API
-                    // needs every call of a turn in one message, followed by all
-                    // of its results, or it rejects the whole history.
-                    let is_call = |block: Option<&Value>| {
-                        block.is_some_and(|block| block["type"] == "tool-call")
-                    };
-                    if let Some(blocks) = values
-                        .last_mut()
-                        .filter(|last| last["role"] == "assistant")
-                        .and_then(|last| last["content"].as_array_mut())
-                        .filter(|blocks| is_call(blocks.last()) && is_call(content.first()))
+                    let calls = message.content.iter().filter_map(|block| match block {
+                        Block::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    });
+                    // Other agents log one line per block and write a result as
+                    // soon as its tool ends, so the calls of one turn arrive apart
+                    // and with results between them. Anthropic's API needs every
+                    // call of a turn in one message, then all of its results, or it
+                    // rejects the whole history. While a call has no result, what
+                    // the assistant says next belongs to the same message.
+                    if !pending.is_empty()
+                        && let Some(blocks) = group
+                            .and_then(|index| values.get_mut(index))
+                            .and_then(|value: &mut Value| value["content"].as_array_mut())
                     {
                         blocks.extend(content);
+                        pending.extend(calls);
                         continue;
                     }
+                    pending = calls.collect();
+                    group = Some(values.len());
                     let mut obj = json!({
                         "role": "assistant",
                         "content": content,
@@ -572,6 +628,10 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
                 }
             }
         }
+    }
+
+    if let Some(last) = messages.last() {
+        flush_held(&mut values, &mut held, last);
     }
 
     let mut blobs = Vec::new();
@@ -1556,6 +1616,13 @@ fn serialize_user_block(block: &Block) -> Value {
         other => {
             let text = match other {
                 Block::Thinking { text, .. } => text.clone(),
+                Block::ToolUse {
+                    tool: Tool::Command { command, args },
+                    ..
+                } => match args {
+                    Some(args) => format!("{command} {args}"),
+                    None => command.clone(),
+                },
                 Block::ToolUse { tool, .. } => format!("{tool:?}"),
                 Block::ToolResult { content, .. } => tool_output_text(content),
                 Block::Artifact { artifact } => artifact.display_text(),
@@ -1607,28 +1674,54 @@ fn serialize_assistant_block(
 }
 
 fn parse_image(v: &Value) -> Option<Block> {
-    let source = v.get("source")?;
+    // Cursor stores `{image, mimeType}`; chats written before that was known
+    // carry Anthropic's `source` shape, which is still read.
+    if let Some(source) = v.get("source") {
+        return Some(Block::Image {
+            source: ImageSource {
+                source_type: source
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("base64")
+                    .to_string(),
+                media_type: source.get("media_type")?.as_str()?.to_string(),
+                data: source.get("data")?.as_str()?.to_string(),
+            },
+        });
+    }
+    let image = v.get("image")?.as_str()?;
+    let declared = ["mimeType", "mediaType", "media_type"]
+        .iter()
+        .find_map(|key| v.get(*key).and_then(Value::as_str));
+    if let Some((header, data)) = image
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+    {
+        return Some(Block::Image {
+            source: ImageSource {
+                source_type: "base64".to_string(),
+                media_type: declared.unwrap_or(header).to_string(),
+                data: data.to_string(),
+            },
+        });
+    }
     Some(Block::Image {
         source: ImageSource {
-            source_type: source
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("base64")
-                .to_string(),
-            media_type: source.get("media_type")?.as_str()?.to_string(),
-            data: source.get("data")?.as_str()?.to_string(),
+            source_type: "base64".to_string(),
+            media_type: declared?.to_string(),
+            data: image.to_string(),
         },
     })
 }
 
+/// Cursor reads an image part as `{image, mimeType}`: the Anthropic `source`
+/// shape reaches it as an object with no `image`, and its history rebuild
+/// fails on `undefined.toString()`.
 fn serialize_image(source: &ImageSource) -> Value {
     json!({
         "type": "image",
-        "source": {
-            "type": source.source_type,
-            "media_type": source.media_type,
-            "data": source.data,
-        },
+        "image": source.data,
+        "mimeType": source.media_type,
     })
 }
 
