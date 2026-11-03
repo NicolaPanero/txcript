@@ -49,8 +49,10 @@ tag examples when a Grok export has no display log. `fork.20` adds `history` (th
 3. Push the branch and a `v<version>-fork.<N>` tag.
 
 `.github/workflows/fork-release.yml` then tests, builds the `txcript` CLI and
-the `superset-transfer` helper for Apple Silicon and Windows x64, and publishes them as the
-latest release. Superset++ pins the tested version in
+the `superset-transfer` helper for Apple Silicon, and publishes them as the
+latest release. The Windows x64 build is off: GitHub's Windows runners were not available in time.
+To publish Windows again, restore the `windows-2022` matrix entry, the NASM and packaging steps
+and the zip names in `fork-release.yml` (see git history). Superset++ pins the tested version in
 `scripts/fork/txcript-version.json`; update that pin only after the txcript
 release succeeds. A release never starts a Superset or Zed build: Superset
 builds only when the pin changes on its `fork/main`.

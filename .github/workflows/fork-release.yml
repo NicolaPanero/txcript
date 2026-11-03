@@ -43,7 +43,7 @@ jobs:
           if [ "$EVENT_NAME" = push ] && [ "$TAG" != "$latest" ]; then build=false; fi
           release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets 2>/dev/null || true)
           if [ -n "$release" ]; then
-            if echo "$release" | jq -e '.isDraft == false and ([.assets[].name] | contains(["txcript-aarch64-apple-darwin.tar.gz", "superset-transfer-aarch64-apple-darwin.tar.gz", "txcript-x86_64-pc-windows-msvc.zip", "superset-transfer-x86_64-pc-windows-msvc.zip", "SHA256SUMS"]))' >/dev/null; then
+            if echo "$release" | jq -e '.isDraft == false and ([.assets[].name] | contains(["txcript-aarch64-apple-darwin.tar.gz", "superset-transfer-aarch64-apple-darwin.tar.gz", "SHA256SUMS"]))' >/dev/null; then
               build=false
             else
               echo "::error::An incomplete immutable release already exists; repair it or use a new tag."
@@ -61,8 +61,6 @@ jobs:
         include:
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -76,7 +74,6 @@ jobs:
           key: txcript-tools-v1-${{ matrix.target }}-${{ needs.check.outputs.sha }}
           path: |
             *-aarch64-apple-darwin.tar.gz
-            *-x86_64-pc-windows-msvc.zip
             SHA256SUMS-*
       - uses: dtolnay/rust-toolchain@1.96
         if: steps.package-cache.outputs.cache-hit != 'true'
@@ -86,12 +83,6 @@ jobs:
         if: steps.package-cache.outputs.cache-hit != 'true'
         with:
           key: ${{ matrix.target }}
-      - name: Install Windows assembler
-        if: runner.os == 'Windows' && steps.package-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          choco install nasm --no-progress -y
-          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Verify versions
         run: |
           version="${TAG#v}"
@@ -122,25 +113,11 @@ jobs:
           tar -czf txcript-aarch64-apple-darwin.tar.gz -C dist/cli txcript LICENSE
           tar -czf superset-transfer-aarch64-apple-darwin.tar.gz -C dist/helper superset-transfer LICENSE
           shasum -a 256 *-aarch64-apple-darwin.tar.gz > SHA256SUMS-mac
-      - name: Package Windows
-        if: runner.os == 'Windows' && steps.package-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          if ((& ./target/release/txcript.exe --version) -ne "txcript $($env:TAG.Substring(1))") { throw "Version mismatch" }
-          & ./target/release/examples/superset-transfer.exe capabilities
-          if ($LASTEXITCODE -ne 0) { throw "Helper unavailable" }
-          New-Item -ItemType Directory -Force dist/cli, dist/helper | Out-Null
-          Copy-Item target/release/txcript.exe, LICENSE dist/cli/
-          Copy-Item target/release/examples/superset-transfer.exe, LICENSE dist/helper/
-          Compress-Archive -Path dist/cli/* -DestinationPath txcript-x86_64-pc-windows-msvc.zip
-          Compress-Archive -Path dist/helper/* -DestinationPath superset-transfer-x86_64-pc-windows-msvc.zip
-          Get-ChildItem *-x86_64-pc-windows-msvc.zip | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + "  " + $_.Name } | Set-Content -Encoding ascii SHA256SUMS-win
       - uses: actions/upload-artifact@v4
         with:
           name: tools-${{ matrix.target }}
           path: |
             *-aarch64-apple-darwin.tar.gz
-            *-x86_64-pc-windows-msvc.zip
             SHA256SUMS-*
           if-no-files-found: error
   publish:
@@ -168,4 +145,4 @@ jobs:
             echo "Release already exists; preserving immutable assets"
             exit 0
           fi
-          gh release create "$TAG" *-aarch64-apple-darwin.tar.gz *-x86_64-pc-windows-msvc.zip SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "txcript ${TAG#v}" --notes "Verified CLI and conversion helper for Apple Silicon macOS and Windows x64." "$latest_flag"
+          gh release create "$TAG" *-aarch64-apple-darwin.tar.gz SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "txcript ${TAG#v}" --notes "Verified CLI and conversion helper for Apple Silicon macOS." "$latest_flag"
